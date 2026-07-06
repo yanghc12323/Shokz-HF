@@ -2,5 +2,5 @@ region_id,region_name,used_patch_file,source_point_count,sample_point_count,expe
 T001,耳甲腔上区,False,402,45,45,0.0,LinearNDInterpolator,PASS
 T002,耳甲腔下区,False,388,45,45,0.0,LinearNDInterpolator,PASS
 T003,耳甲腔前区,False,102,45,45,0.0222,LinearNDInterpolator,PASS
-T004,耳屏区,False,759,28,28,0.0,LinearNDInterpolator,PASS
-T005,对耳屏区,False,1030,28,28,0.0,LinearNDInterpolator,PASS
+T004,耳屏区,False,759,45,45,0.0,LinearNDInterpolator,PASS
+T005,对耳屏区,False,1030,45,45,0.0,LinearNDInterpolator,PASS
