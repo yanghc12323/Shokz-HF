@@ -1,6 +1,6 @@
-region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca,product_note  
-T001,耳甲腔上区,L10,L13,L31,8,1,耳甲腔上部支撑  
-T002,耳甲腔前下区,L10,L19,L21,8,1,声学口与前端避让  
-T003,耳屏对耳屏区,L19,L20,L21,6,1,前端结构避让  
-T004,耳道入口区,L28,L29,L30,5,1,声学口定位  
-T005,耳根上后区,L07,L15,L31,6,0,耳挂路径参考 
+region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
+T001,耳甲腔上区,L10,L29,L28,8,1
+T002,耳甲腔下区,L10,L31,L30,8,1
+T003,耳甲腔前区,L10,L28,L30,8,1
+T004,耳屏区,L19,L21,L28,6,0
+T005,对耳屏区,L20,L21,L15,6,0
