@@ -9,8 +9,6 @@ config.py — 全局配置与常量定义
 技术依据: 《人头给你了-3D 耳模型跨模型参数化与特征值计算技术执行文档-v0.0》
 """
 
-from pathlib import Path
-
 # ============================================================================
 # 特征点定义
 # ============================================================================
@@ -67,21 +65,7 @@ DIR_LANDMARKS: str = "data/landmarks"
 DIR_OUTPUT_POINTS: str = "output/parameterized_points"
 DIR_OUTPUT_QC: str = "output/qc"
 DIR_OUTPUT_LOGS: str = "output/logs"
-DIR_PATCHES: str = "data/patches"
 
 # 区域定义表路径
 PATH_REGION_TABLE: str = "config/region_table.csv"
 
-
-def get_project_root() -> Path:
-    """
-    获取项目根目录.
-
-    从 ear_param 包所在位置向上两层即为 ear_project 根目录.
-
-    Returns
-    -------
-    Path
-        项目根目录的绝对路径.
-    """
-    return Path(__file__).resolve().parent.parent

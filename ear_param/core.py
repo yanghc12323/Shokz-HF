@@ -41,6 +41,82 @@ from .config import (
 
 
 # ============================================================================
+# 二维展开 (UV Unwrapping) — Atlas 坐标映射
+# ============================================================================
+
+# Atlas 布局: 5 个区域排列在 3 列 × 2 行的网格中
+# +-----------+-----------+-----------+
+# |   T001    |   T002    |   T003    |
+# | 耳甲腔上区 | 耳甲腔下区 | 耳甲腔前区 |
+# |  col=0    |  col=1    |  col=2    |
+# |  row=0    |  row=0    |  row=0    |
+# +-----------+-----------+-----------+
+# |   T004    |   T005    | (空)      |
+# |  耳屏区   | 对耳屏区   |           |
+# |  col=0    |  col=1    |           |
+# |  row=1    |  row=1    |           |
+# +-----------+-----------+-----------+
+
+_ATLAS_COLS: int = 3
+
+_ATLAS_REGION_LAYOUT: dict[str, tuple[int, int]] = {
+    # region_id → (col, row)
+    "T001": (0, 0),
+    "T002": (1, 0),
+    "T003": (2, 0),
+    "T004": (0, 1),
+    "T005": (1, 1),
+}
+
+
+def _to_atlas_uv(
+    bary_grid: np.ndarray,
+    region_id: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    将重心坐标网格转换为双层 UV 坐标 (local + atlas).
+
+    Local UV:
+      u_local = λ_b,  v_local = λ_c
+      每个区域独立映射到单位三角形: (0,0)–(1,0)–(0,1).
+      用途: 跨样本同区域对应点的归一化位置对齐.
+
+    Atlas UV:
+      u_atlas = col + λ_b,  v_atlas = row + λ_c
+      其中 (col, row) 由 _ATLAS_REGION_LAYOUT 查找.
+      所有区域共存于一张 3×2 网格的 2D 图上.
+      用途: 全局可视化, 一眼辨认采样点的解剖位置.
+
+    Parameters
+    ----------
+    bary_grid : np.ndarray, shape (K, 3)
+        重心坐标网格, 每行 [λ_a, λ_b, λ_c].
+    region_id : str
+        区域编号, 如 'T001'.
+
+    Returns
+    -------
+    u_local : np.ndarray, shape (K,)
+    v_local : np.ndarray, shape (K,)
+    u_atlas : np.ndarray, shape (K,)
+    v_atlas : np.ndarray, shape (K,)
+    """
+    lambda_b = bary_grid[:, 1]
+    lambda_c = bary_grid[:, 2]
+
+    # Local UV — 直接等于重心坐标分量
+    u_local = lambda_b.copy()
+    v_local = lambda_c.copy()
+
+    # Atlas UV — 加上区域所在网格单元偏移
+    col, row = _ATLAS_REGION_LAYOUT.get(region_id, (0, 0))
+    u_atlas = col + lambda_b
+    v_atlas = row + lambda_c
+
+    return u_local, v_local, u_atlas, v_atlas
+
+
+# ============================================================================
 # 三角形退化检测
 # ============================================================================
 
@@ -457,7 +533,20 @@ def process_region(
         f"状态={status}"
     )
 
-    # 8. 组装输出 DataFrame
+    # 8. 二维展开: 计算 UV 坐标
+    u_local, v_local, u_atlas, v_atlas = _to_atlas_uv(
+        bary_grid=target_grid,
+        region_id=region["region_id"],
+    )
+
+    logger.debug(
+        f"    UV: local_u ∈ [{u_local.min():.3f}, {u_local.max():.3f}], "
+        f"local_v ∈ [{v_local.min():.3f}, {v_local.max():.3f}], "
+        f"atlas_u ∈ [{u_atlas.min():.3f}, {u_atlas.max():.3f}], "
+        f"atlas_v ∈ [{v_atlas.min():.3f}, {v_atlas.max():.3f}]"
+    )
+
+    # 9. 组装输出 DataFrame
     point_ids_global = global_start_id + np.arange(n_target)
     point_ids_region = np.arange(n_target)
 
@@ -471,8 +560,10 @@ def process_region(
         "x": reconstructed[:, 0],
         "y": reconstructed[:, 1],
         "z": reconstructed[:, 2],
-        "u": np.nan,          # 等实现二维展开后再填充
-        "v": np.nan,
+        "u": u_atlas,          # 全局 atlas 坐标 (可视化用)
+        "v": v_atlas,
+        "u_local": u_local,    # 区域内归一化坐标 (统计分析用)
+        "v_local": v_local,
         "lambda_a": target_grid[:, 0],
         "lambda_b": target_grid[:, 1],
         "lambda_c": target_grid[:, 2],

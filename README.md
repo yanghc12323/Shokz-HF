@@ -1,91 +1,235 @@
-# 3D 耳模型跨模型参数化 — 参数化采样模块（2026-07-06）
+# 3D 耳模型跨模型参数化 — 参数化采样与降采样模块
 
-> 技术依据：《人头给你了-3D 耳模型跨模型参数化与特征值计算技术执行文档-v0.0》第 3 章
+> 技术依据：《人头给你了-3D 耳模型跨模型参数化与特征值计算技术执行文档-v0.0》第 3 章  
+> 最后更新：2026-07-06
 
 ---
 
 ## 目录
 
-1. [项目概述](#项目概述)
-2. [输入](#输入)
-3. [输出](#输出)
-4. [算法详解](#算法详解)
-   - [步骤 1：三角形退化检测](#步骤-1三角形退化检测)
-   - [步骤 2：源点裁剪（Mesh 顶点投影筛选）](#步骤-2源点裁剪mesh-顶点投影筛选)
-   - [步骤 3：重心坐标批量计算（最小二乘投影）](#步骤-3重心坐标批量计算最小二乘投影)
-   - [步骤 4：固定分辨率重心坐标网格生成](#步骤-4固定分辨率重心坐标网格生成)
+1. [背景与问题的提出](#背景与问题的提出)
+2. [项目概述](#项目概述)
+3. [数学原理](#数学原理)
+4. [项目结构](#项目结构)
+5. [输入](#输入)
+6. [输出](#输出)
+7. [完整操作流程（从头到尾）](#完整操作流程从头到尾)
+8. [算法详解](#算法详解)
+   - [步骤 0：三角形退化检测](#步骤-0三角形退化检测)
+   - [步骤 1：源点裁剪（Mesh 顶点投影筛选）](#步骤-1源点裁剪mesh-顶点投影筛选)
+   - [步骤 2：重心坐标批量计算（最小二乘投影）](#步骤-2重心坐标批量计算最小二乘投影)
+   - [步骤 3：固定分辨率重心坐标网格生成](#步骤-3固定分辨率重心坐标网格生成)
+   - [步骤 4：源面片构建（保留原始 mesh 拓扑）](#步骤-4源面片构建保留原始-mesh-拓扑)
    - [步骤 5：插值重建采样点三维坐标](#步骤-5插值重建采样点三维坐标)
    - [步骤 6：QC 质量评估](#步骤-6qc-质量评估)
-5. [项目结构](#项目结构)
-6. [快速开始](#快速开始)
-7. [配置参数速查](#配置参数速查)
-8. [下一步工作](#下一步工作)
+9. [执行入口说明](#执行入口说明)
+10. [日志系统](#日志系统)
+11. [配置参数速查](#配置参数速查)
+12. [模拟数据说明](#模拟数据说明)
+13. [FAQ & 常见问题](#faq--常见问题)
+14. [下一步工作](#下一步工作)
+
+---
+
+## 背景与问题的提出
+
+### 1. 我们要干什么？
+
+我们有多个不同人的 3D 耳朵 mesh（三角形网格），每个耳朵的形状不同，顶点数量、面片拓扑都不同。我们希望在耳朵上定义若干**三角区域**（以解剖标志点为顶点），在每个区域内采样**固定数量**的均匀分布点，使得不同样本的采样点一一对应，便于跨样本统计分析（如 PCA 特征值分析）。
+
+### 2. 核心挑战
+
+| 挑战 | 说明 |
+|------|------|
+| **顶点数量不统一** | 不同样本的 mesh 顶点数不同（几百到几万不等），不能直接放在一个矩阵里 |
+| **拓扑不一致** | 每个 mesh 的三角面片连接关系不同，无法按面片索引对齐 |
+| **需要固定样点** | PCA 要求所有样本的同一特征位置有对应值，即每个区域的采样点数必须完全相同 |
+| **保留曲面信息** | 采样点必须落在耳朵曲面上，不能是纯平面三角形内插值 |
+
+### 3. 解决方案
+
+将所有三角形区域通过**重心坐标**（Barycentric Coordinates）投影到一个统一的二维参数空间，在参数空间中生成固定分辨率网格，再利用原始 mesh 的拓扑信息（面片）做**面片感知的 point-in-triangle 插值**，重建出每个网格点的三维坐标。
 
 ---
 
 ## 项目概述
 
-本模块实现**三维三角区域 → 二维平面投影 → 均匀降采样 → 插值重建**的完整流水线。
+### 一句话总结
 
-### 核心思路
+> 将 3D 耳 mesh 上由解剖 landmark 定义的三角形区域投影至重心坐标参数平面，在参数平面上按固定分辨率采样，再借助原始 mesh 面片拓扑插值重建三维坐标，输出每样本固定数量、固定顺序的采样点集。
 
-将 3D 耳 mesh 上由 3 个解剖特征点（landmark）定义的三角形区域（如耳甲腔上区、耳屏区等），通过**重心坐标（Barycentric Coordinates）** 将区域内的所有 mesh 顶点投影到三角形确定的二维参数平面上，在参数域中按固定分辨率生成均匀分布的采样网格点，再由三角区域内的源点坐标插值重建出每个采样网格点的三维空间坐标。
+### 核心流程图
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        输入                                      │
+│  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐       │
+│  │ 耳 Mesh      │  │ Landmarks    │  │ 区域定义表         │       │
+│  │ (.ply)       │  │ (.csv)       │  │ region_table.csv   │       │
+│  └──────┬──────┘  └──────┬───────┘  └────────┬──────────┘       │
+│         │                │                    │                  │
+│         └────────────────┼────────────────────┘                  │
+│                          ▼                                       │
+│            ┌─────────────────────────┐                           │
+│            │  process_region()  × 5  │   ← 每个三角区域独立处理  │
+│            │  (core.py)              │                           │
+│            │                         │                           │
+│            │  ① 退化检测             │                           │
+│            │  ② 顶点采样 + 重心投影  │                           │
+│            │  ③ 裁剪源点             │                           │
+│            │  ④ 构建源面片           │                           │
+│            │  ⑤ 生成网格 + 插值重建  │                           │
+│            │  ⑥ QC 评估              │                           │
+│            └────────────┬────────────┘                           │
+│                         ▼                                        │
+│                     输     出                                    │
+│  ┌────────────────┐  ┌───────────┐  ┌────────────────┐          │
+│  │ 采样点 CSV      │  │ QC 报告   │  │ 运行日志 .log   │          │
+│  │ (225 点/样本)   │  │ (.csv)    │  │                │          │
+│  └────────────────┘  └───────────┘  └────────────────┘          │
+└──────────────────────────────────────────────────────────────────┘
+```
 
 ### 为什么需要这一步？
 
-不同样本（不同人的耳朵）的 mesh 顶点数量、面片拓扑、顶点分布都不同，无法直接进行跨样本的统计分析（如 PCA 特征值分析）。通过参数化采样，将每个样本的任意三角区域统一为**固定数量、固定拓扑排列**的采样点集，使得：
+| 问题 | 解决方式 |
+|------|----------|
+| 不同样本顶点数不同 | 统一采样为固定点数（如每区 45 点，5 区共 225 点） |
+| 不同样本拓扑不同 | 采样点在参数空间的位置（重心坐标）是固定的，跨样本可对齐 |
+| 需要曲面信息 | v2.0 使用面片感知插值，保留原始 mesh 的曲面拓扑 |
+| 需要可溯源性 | 每个采样点记录了所用的三个 landmark 和重心坐标 λ_a, λ_b, λ_c |
 
-- 每个区域在每个样本上的采样点数**完全相同**（当前为每区 45 点，共 5 区 225 点）
-- 采样点在参数空间中的位置（重心坐标）**固定且可溯源**
-- 所有样本的采样点按相同顺序排列，可直接堆叠为数据矩阵进行 PCA
+---
 
-### 输入输出总览
+## 数学原理
+
+### 1. 重心坐标 (Barycentric Coordinates)
+
+对于空间三角形 ΔABC，其平面上任意一点 P 可表示为：
 
 ```
-┌──────────────────┐                          ┌──────────────────────────────┐
-│  输入             │                          │  输出                         │
-│                   │     ┌──────────────┐      │                              │
-│  耳 Mesh (.ply)   │────▶│              │─────▶│  采样点 CSV (225 点 × N 样本) │
-│  Landmarks (.csv) │────▶│  参数化流水线  │─────▶│  QC 报告 CSV                 │
-│  区域定义表 (.csv) │────▶│              │─────▶│  运行日志 .log               │
-│                   │     └──────────────┘      │                              │
-└──────────────────┘                          └──────────────────────────────┘
+P = λ_a·A + λ_b·B + λ_c·C
 ```
+
+其中 λ_a + λ_b + λ_c = 1，且当点 P 在三角形内部时有 0 ≤ λ_a, λ_b, λ_c ≤ 1。
+
+### 2. 3D 点到三角形平面的最小二乘投影
+
+给定三角形顶点 A、B、C 和一个 3D 点 P：
+
+1. 在三角形平面中建立局部坐标系，以 A 为原点，u⃗ = B − A、v⃗ = C − A 为基向量。
+2. 将 P − A 投影到 (u⃗, v⃗) 张成的子空间，解得坐标 (u, v)。
+3. 由 u, v 反算重心坐标：λ_b = u，λ_c = v，λ_a = 1 − λ_b − λ_c。
+
+这就是**二维参数化**：每个 3D 点映射到一个 (λ_b, λ_c) 二维坐标，共面点保距（仿射变换）。
+
+### 3. 固定分辨率采样网格
+
+在重心坐标参数空间 [0, 1]² 中，以分辨率 r 等间距采样。对于 r = 8，步长 = 1/8，在三角形区域（满足 λ_a + λ_b + λ_c = 1 且 λ_i ≥ 0）内，总采样点数：
+
+```
+N = (r + 1)(r + 2) / 2 = 9 × 10 / 2 = 45
+```
+
+### 4. 面片感知 Point-in-Triangle 插值 (v2.0)
+
+不再使用全局插值器（如 LinearNDInterpolator），而是：
+
+1. 从原始 mesh 中提取所有三个顶点都落在三角区域内的**源面片**。
+2. 将每个源面片投影到 (λ_b, λ_c) 参数空间，形成一个 2D 三角形。
+3. 对每个目标网格点，测试它落在哪个源面片的 2D 投影内。
+4. 若找到包含该点的面片，用该面片三个顶点的 3D 坐标和点在面片内的重心坐标做线性插值。
+5. 若未找到任何包含面片，在参数空间中找最近源点兜底（而非 3D 最近邻，避免跨解剖结构匹配）。
+
+---
+
+## 项目结构
+
+```
+（项目根目录）/
+│
+├── README.md                    ← 本文件
+├── requirements.txt             ← Python 依赖
+├── .gitignore                   ← Git 忽略规则
+│
+├── config/
+│   └── region_table.csv         ← 区域定义表（5 个三角区域）
+│
+├── ear_param/                   ← 核心 Python 包
+│   ├── __init__.py              ← 包初始化
+│   ├── config.py                ← 全局配置常量
+│   ├── core.py                  ← ★ 核心算法（退化检测/投影/面片构建/插值/QC/UV 展开）
+│   ├── synthetic.py             ← 模拟数据生成
+│   ├── io_utils.py              ← 文件 I/O 与日志系统
+│   └── run.py                   ← 流程编排（模拟模式 + 单样本模式）
+│
+├── scripts/
+│   └── parameterize_ear.py      ← ★ 命令行入口
+│
+├── data/                        ← 输入数据目录（运行时自动创建）
+│   ├── clean_mesh/              ←   耳 mesh 文件 (.ply)
+│   └── landmarks/               ←   特征点文件 (.csv)
+│
+└── output/                      ← 输出目录（运行时自动创建）
+    ├── parameterized_points/    ←   采样点 CSV
+    ├── qc/                      ←   QC 报告 CSV
+    └── logs/                    ←   运行日志 .log
+```
+
+### 各模块职责
+
+| 文件 | 行数 | 职责 |
+|------|:---:|------|
+| `ear_param/core.py` | 726 | 全部数学运算：退化检测、重心投影、源面片构建、point-in-triangle 插值、QC 评估 |
+| `ear_param/run.py` | 470 | 将 core.py 各函数编排成完整流水线，提供模拟模式和单样本模式两个入口 |
+| `ear_param/synthetic.py` | 325 | 生成三组模拟耳 mesh + landmarks，用于无真实数据时测试流水线 |
+| `ear_param/io_utils.py` | 338 | CSV 多编码读取、mesh 加载/保存、双通道日志配置 |
+| `ear_param/config.py` | 65 | 所有可调参数集中管理 |
+| `scripts/parameterize_ear.py` | 65 | 命令行参数解析 + 路由到 run.py |
+| `config/region_table.csv` | 6 行 | 5 个三角区域的定义（顶点 landmark、分辨率） |
 
 ---
 
 ## 输入
 
-| 输入项 | 格式 | 说明 | 示例 |
-|--------|------|------|------|
-| **耳 mesh** | `.ply` / `.obj` / `.stl` | 单个耳朵的三角形网格，包含顶点坐标和面片索引 | `data/clean_mesh/S001_R.ply` |
-| **特征点 (landmarks)** | `.csv` | 解剖标志点的三维坐标，含 `landmark_id, x, y, z` 列 | `data/landmarks/S001_R_landmarks.csv` |
-| **区域定义表** | `.csv` | 指定每个三角区域的三个顶点 landmark、采样分辨率 | `config/region_table.csv` |
+### 1. 耳 Mesh（`.ply`）
 
-### 区域定义表 (`config/region_table.csv`)
+- 单只耳朵的三角网格，包含顶点坐标 `(x, y, z)` 和面片索引。
+- 格式：PLY（推荐）/ OBJ / STL。
+- 示例命名：`S001_R.ply`（样本 S001，右耳）。
 
-| 字段 | 说明 |
-|------|------|
-| `region_id` | 区域唯一编号（如 `T001`） |
-| `region_name` | 区域中文名称（如 `耳甲腔上区`） |
-| `lm_a, lm_b, lm_c` | 三角形三个顶点的 landmark ID |
-| `resolution` | 采样分辨率，点数 = (resolution+1)×(resolution+2)/2 |
-| `use_for_pca` | 1 = 用于 PCA 分析，0 = 仅辅助/可视化 |
+### 2. 特征点 Landmarks（`.csv`）
 
-当前定义 5 个区域：
+- 解剖标志点的三维坐标。
+- 必需列：`landmark_id, x, y, z`。
+- 示例命名：`S001_R_landmarks.csv`。
 
-| 区域 | 顶点 | resolution | 采样点数 |
-|------|------|:---:|:---:|
-| T001 耳甲腔上区 | L10–L29–L28 | 8 | 45 |
-| T002 耳甲腔下区 | L10–L31–L30 | 8 | 45 |
-| T003 耳甲腔前区 | L10–L28–L30 | 8 | 45 |
-| T004 耳屏区 | L19–L21–L28 | 8 | 45 |
-| T005 对耳屏区 | L20–L21–L15 | 8 | 45 |
-| **合计** | | | **225** |
+### 3. 区域定义表 `config/region_table.csv`
 
-### 特征点需求
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `region_id` | str | 区域唯一编号（如 `T001`） |
+| `region_name` | str | 区域中文名称（如 `耳甲腔上区`） |
+| `lm_a` | str | 三角形顶点 A 的 landmark ID |
+| `lm_b` | str | 三角形顶点 B 的 landmark ID |
+| `lm_c` | str | 三角形顶点 C 的 landmark ID |
+| `resolution` | int | 采样分辨率（点数 = (r+1)(r+2)/2） |
+| `use_for_pca` | int | 1 = 用于 PCA，0 = 仅辅助/可视化 |
 
-区域定义表中引用了以下 9 个 landmark（来自论文 31 个特征点子集）：
+当前定义的 5 个区域：
+
+| 区域 | 名称 | 顶点 | resolution | 采样点数 |
+|------|------|------|:---:|:---:|
+| T001 | 耳甲腔上区 | L10–L29–L28 | 8 | 45 |
+| T002 | 耳甲腔下区 | L10–L31–L30 | 8 | 45 |
+| T003 | 耳甲腔前区 | L10–L28–L30 | 8 | 45 |
+| T004 | 耳屏区 | L19–L21–L28 | 8 | 45 |
+| T005 | 对耳屏区 | L20–L21–L15 | 8 | 45 |
+| **合计** | | | | **225** |
+
+### 4. 所需的 Landmark 子集
+
+区域定义表中引用了以下 9 个 landmark（来自论文 31 个特征点的子集）：
 
 | ID | 解剖位置 |
 |:---|------|
@@ -103,420 +247,622 @@
 
 ## 输出
 
-| 输出项 | 格式 | 目录 | 说明 |
-|--------|------|------|------|
-| **采样点文件** | `.csv` | `output/parameterized_points/` | 每个样本一份，包含所有 225 个采样点的坐标和元数据 |
-| **QC 报告** | `.csv` | `output/qc/` | 每个样本一份，每个区域的采样质量评估（PASS / WARNING / FAIL） |
-| **运行日志** | `.log` | `output/logs/` | 每个样本一份，记录完整的调试信息 |
+### 1. 采样点 CSV（`output/parameterized_points/S001_R_points.csv`）
 
-### 采样点文件字段说明
+每行一个采样点，包含以下字段：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `sample_id` | str | 样本编号（如 `S001`） |
-| `side` | str | 左右侧（`R` / `L`） |
-| `region_id` | str | 区域编号（如 `T001`） |
-| `region_name` | str | 区域中文名称（如 `耳甲腔上区`） |
-| `point_id_global` | int | 全局采样点唯一编号（0–224） |
-| `point_id_region` | int | 区域内采样点编号（从 0 开始） |
-| `x, y, z` | float | 采样点在原始三维空间中的坐标（在 mesh 表面上） |
-| `u, v` | float | 二维展开坐标（预留字段，当前为 NaN，后续实现 UV 展开时填充） |
-| `lambda_a, lambda_b, lambda_c` | float | 重心坐标，满足 λa + λb + λc = 1，可完整溯源采样点在三角形中的位置 |
-| `lm_a, lm_b, lm_c` | str | 三角形三个顶点对应的 landmark ID |
+| `sample_id` | str | 样本编号 |
+| `side` | str | 左右侧 (R/L) |
+| `region_id` | str | 区域编号 |
+| `region_name` | str | 区域中文名称 |
+| `point_id_global` | int | 全局采样点编号（跨区域连续） |
+| `point_id_region` | int | 区域内采样点编号（0 起） |
+| `x, y, z` | float | 重建的三维坐标 |
+| `u, v` | float | 二维 UV 展开坐标（基于重心坐标 λ_b、λ_c 的仿射变换，已实际计算） |
+| `lambda_a, lambda_b, lambda_c` | float | 重心坐标（可溯源） |
+| `lm_a, lm_b, lm_c` | str | 三角形顶点 landmark ID |
 
-### 采样点排列顺序
-
-全局采样点按区域顺序排列：T001(0–44) → T002(45–89) → T003(90–134) → T004(135–179) → T005(180–224)。
-
-区域内采样点按重心坐标网格的行优先顺序排列（即 `make_barycentric_grid` 的生成顺序：i 从 0 到 resolution, j 从 0 到 resolution−i）。
-
-### QC 报告字段说明
+### 2. QC 报告（`output/qc/S001_R_qc.csv`）
 
 | 字段 | 说明 |
 |------|------|
 | `region_id` | 区域编号 |
 | `region_name` | 区域名称 |
-| `source_point_count` | 三角区域内的源点（mesh 顶点投影到三角形内部的）数量 |
-| `sample_point_count` | 实际生成的采样点数 |
-| `expected_point_count` | 预期采样点数（应与 sample_point_count 一致） |
-| `fallback_ratio` | 最近邻兜底比例（见 [步骤 5](#步骤-5插值重建采样点三维坐标) 和 [步骤 6](#步骤-6qc-质量评估)） |
-| `interpolator` | 使用的插值器名称 |
-| `status` | 质量等级：`PASS` / `WARNING` / `FAIL` |
+| `used_patch_file` | 是否使用了补丁文件 |
+| `source_point_count` | 三角区域内的源点数 |
+| `source_face_count` | 三角区域内的源面片数 |
+| `sample_point_count` | 输出的采样点数 |
+| `expected_point_count` | 期望的采样点数 |
+| `fallback_ratio` | 兜底插值比例 |
+| `interpolator` | 使用的插值器类型 |
+| `status` | QC 状态：PASS / WARNING / FAIL |
+
+**QC 判定标准：**
+
+- `fallback_ratio ≤ 5%` → **PASS** ✅
+- `5% < fallback_ratio ≤ 20%` → **WARNING** ⚠️
+- `fallback_ratio > 20%` → **FAIL** ❌
+
+### 3. 运行日志（`output/logs/`）
+
+- 文件命名：`{sample_id}_{side}_parameterize_{时间戳}.log`
+- 双通道输出：
+  - **控制台**：INFO 级别（关键步骤摘要）
+  - **日志文件**：DEBUG 级别（含所有中间变量的详细记录）
+
+---
+
+## 完整操作流程（从头到尾）
+
+### 前置条件
+
+1. **Python 环境**
+   ```bash
+   Python >= 3.10
+   ```
+
+2. **安装依赖**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   `requirements.txt` 内容：
+   ```
+   numpy>=1.24
+   pandas>=1.5
+   trimesh>=4.0
+   scipy>=1.10
+   ```
+
+3. **确认目录结构正确**（见[项目结构](#项目结构)）。
+
+---
+
+### 方式 A：模拟模式（无真实数据时）
+
+这是**一键运行**模式，程序自动生成三组模拟的耳朵 mesh 和 landmarks，然后执行完整的参数化流水线。
+
+```bash
+python scripts/parameterize_ear.py
+```
+
+**执行流程图解：**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  python scripts/parameterize_ear.py  (无任何参数)                │
+│                                                                  │
+│  ┌───────────────────────┐                                      │
+│  │ 1. CLI 解析参数        │  → 无参数 → mode = "simulation"      │
+│  │    parameterize_ear.py │                                      │
+│  └──────────┬────────────┘                                      │
+│             ▼                                                    │
+│  ┌───────────────────────┐                                      │
+│  │ 2. run_simulation()    │  → run.py                            │
+│  │    ┌─────────────────┐ │                                      │
+│  │    │ 2a. 创建目录     │ │  data/clean_mesh/                   │
+│  │    │                │ │  data/landmarks/                     │
+│  │    │                │ │  output/parameterized_points/        │
+│  │    │                │ │  output/qc/                          │
+│  │    │                │ │  output/logs/                        │
+│  │    ├─────────────────┤ │                                      │
+│  │    │ 2b. 生成模拟数据  │ │  synthetic.py → 3 个 .ply + 3 个   │
+│  │    │   (S001~S003)   │ │  _landmarks.csv                     │
+│  │    ├─────────────────┤ │                                      │
+│  │    │ 2c. 加载区域表    │ │  config/region_table.csv            │
+│  │    ├─────────────────┤ │                                      │
+│  │    │ 2d. 批量参数化    │ │  _batch_parameterize()              │
+│  │    │   对每个样本:     │ │                                      │
+│  │    │   → load_mesh    │ │  io_utils.py                        │
+│  │    │   → load_lms     │ │  io_utils.py                        │
+│  │    │   → 逐区域处理    │ │  core.py / process_region() × 5     │
+│  │    │   → 保存结果      │ │                                      │
+│  │    └─────────────────┘ │                                      │
+│  └────────────────────────┘                                      │
+│                                                                  │
+│  ┌───────────────────────┐                                      │
+│  │ 3. 单区域处理详解       │  core.py / process_region()          │
+│  │    (每个区域执行一次)   │                                      │
+│  │                        │                                      │
+│  │  ① 取三个 landmark    │  A = lms["L10"], B = lms["L29"],     │
+│  │     三维坐标          │  C = lms["L28"]                      │
+│  │  ② 退化检测           │  _is_triangle_degenerate()            │
+│  │                        │  面积 ≈ 0 → 抛异常                   │
+│  │  ③ 顶点采样           │  随机抽 5000 个 mesh 顶点             │
+│  │  ④ 重心投影           │  _barycentric_batch()                 │
+│  │  ⑤ 裁剪源点           │  _clip_points_to_triangle()           │
+│  │                        │  保留 λ_i ∈ [-0.15, 1.15] 的点      │
+│  │  ⑥ 构建源面片         │  _build_source_faces()               │
+│  │                        │  提取完整落在区域内的 mesh 面片       │
+│  │  ⑦ 生成目标网格       │  make_barycentric_grid(r=8)          │
+│  │                        │  → 45 个重心坐标点                    │
+│  │  ⑧ 插值重建           │  _interpolate_sample_points()         │
+│  │                        │  PointInTriangle + 参数域近邻兜底     │
+│  │  ⑨ QC 评估            │  计算 fallback_ratio → PASS/WARN/FAIL│
+│  │  ⑩ 组装 DataFrame     │  输出 45 行 × 15 列                   │
+│  └───────────────────────┘                                      │
+│                                                                  │
+│  ┌───────────────────────┐                                      │
+│  │ 4. 最终摘要            │  打印每个样本的 PASS/WARN/FAIL 统计   │
+│  │    _print_final_summary│                                      │
+│  └───────────────────────┘                                      │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**预期输出文件：**
+
+```
+output/
+├── logs/
+│   ├── SIMULATION_ALL_parameterize_20260706_HHMMSS.log   ← 主日志
+│   ├── S001_R_parameterize_20260706_HHMMSS.log           ← S001 详细日志
+│   ├── S002_R_parameterize_20260706_HHMMSS.log           ← S002 详细日志
+│   └── S003_R_parameterize_20260706_HHMMSS.log           ← S003 详细日志
+├── parameterized_points/
+│   ├── S001_R_points.csv  (225 行)
+│   ├── S002_R_points.csv  (225 行)
+│   └── S003_R_points.csv  (225 行)
+└── qc/
+    ├── S001_R_qc.csv  (5 行)
+    ├── S002_R_qc.csv  (5 行)
+    └── S003_R_qc.csv  (5 行)
+```
+
+**预期控制台输出示例：**
+
+```
+2026-07-06 10:00:00 | INFO    | ============================================================
+2026-07-06 10:00:00 | INFO    | 开始一键模拟流程
+2026-07-06 10:00:00 | INFO    | 项目根目录: D:\YHC\人头项目
+2026-07-06 10:00:00 | INFO    | ============================================================
+2026-07-06 10:00:00 | INFO    | 
+2026-07-06 10:00:00 | INFO    | ============================================================
+2026-07-06 10:00:00 | INFO    | 开始生成模拟数据 (3 组)...
+2026-07-06 10:00:01 | INFO    |   生成 S001: 1500 vertices, noise=0.25, seed=42
+2026-07-06 10:00:01 | INFO    |   生成 S002: 1500 vertices, noise=0.35, seed=123
+2026-07-06 10:00:01 | INFO    |   生成 S003: 1500 vertices, noise=0.28, seed=999
+2026-07-06 10:00:01 | INFO    | 模拟数据生成完成.
+2026-07-06 10:00:01 | INFO    | 区域表: 5 个区域
+2026-07-06 10:00:01 | INFO    |   T001: 耳甲腔上区, resolution=8, 预期点数=45, PCA=是
+2026-07-06 10:00:01 | INFO    |   T002: 耳甲腔下区, resolution=8, 预期点数=45, PCA=是
+2026-07-06 10:00:01 | INFO    |   T003: 耳甲腔前区, resolution=8, 预期点数=45, PCA=是
+2026-07-06 10:00:01 | INFO    |   T004: 耳屏区, resolution=8, 预期点数=45, PCA=否
+2026-07-06 10:00:01 | INFO    |   T005: 对耳屏区, resolution=8, 预期点数=45, PCA=否
+2026-07-06 10:00:01 | INFO    | 
+2026-07-06 10:00:01 | INFO    | ============================================================
+2026-07-06 10:00:01 | INFO    | 开始批量参数化...
+2026-07-06 10:00:01 | INFO    |   [S001_R] 处理区域 T001: 耳甲腔上区
+2026-07-06 10:00:01 | INFO    |     -> 源点=264, 源面片=150, 采样点=45, 兜底=0(0.0%), 状态=PASS
+2026-07-06 10:00:01 | INFO    |   [S001_R] 处理区域 T002: 耳甲腔下区
+2026-07-06 10:00:01 | INFO    |     -> 源点=200, 源面片=120, 采样点=45, 兜底=2(4.4%), 状态=PASS
+... (省略中间区域)
+2026-07-06 10:00:01 | INFO    |   [S001] 完成: 总点数=225, QC: PASS=5 WARNING=0 FAIL=0
+...
+2026-07-06 10:00:02 | INFO    | ============================================================
+2026-07-06 10:00:02 | INFO    | 批量参数化完成 - 最终摘要
+2026-07-06 10:00:02 | INFO    |   OK S001_R: 总点=225, PASS=5, WARN=0, FAIL=0
+2026-07-06 10:00:02 | INFO    |   OK S002_R: 总点=225, PASS=5, WARN=0, FAIL=0
+2026-07-06 10:00:02 | INFO    |   OK S003_R: 总点=225, PASS=5, WARN=0, FAIL=0
+2026-07-06 10:00:02 | INFO    | 
+2026-07-06 10:00:02 | INFO    | 输出目录:
+2026-07-06 10:00:02 | INFO    |   点云: output/parameterized_points
+2026-07-06 10:00:02 | INFO    |   QC:   output/qc
+2026-07-06 10:00:02 | INFO    |   日志: output/logs
+2026-07-06 10:00:02 | INFO    | ============================================================
+```
+
+---
+
+### 方式 B：单样本模式（有真实数据时）
+
+当你有真实的 mesh 和 landmarks 文件后，使用此模式：
+
+```bash
+python scripts/parameterize_ear.py \
+    --sample_id S001 \
+    --side R \
+    --mesh data/clean_mesh/S001_R.ply \
+    --landmarks data/landmarks/S001_R_landmarks.csv
+```
+
+**可选参数：**
+
+| 参数 | 必需 | 默认值 | 说明 |
+|------|:---:|------|------|
+| `--sample_id` | 是 | — | 样本编号 |
+| `--side` | 是 | — | 左右侧（R 或 L） |
+| `--mesh` | 是 | — | mesh 文件路径 |
+| `--landmarks` | 是 | — | landmarks CSV 文件路径 |
+| `--regions` | 否 | `config/region_table.csv` | 区域表路径 |
+| `--out_points` | 否 | `output/parameterized_points/{sample_id}_{side}_points.csv` | 输出路径 |
+| `--out_qc` | 否 | `output/qc/{sample_id}_{side}_qc.csv` | QC 输出路径 |
+| `--log_dir` | 否 | `output/logs` | 日志目录 |
+
+**示例：处理一个真实样本**
+
+```bash
+# 将你的 .ply 文件和 landmarks.csv 放到对应目录后运行：
+python scripts/parameterize_ear.py \
+    --sample_id REAL001 \
+    --side R \
+    --mesh data/clean_mesh/REAL001_R.ply \
+    --landmarks data/landmarks/REAL001_R_landmarks.csv
+```
+
+---
+
+### 方式 C：Python 代码直接调用
+
+```python
+from pathlib import Path
+from ear_param.run import run_simulation, run_single_sample
+
+# 模拟模式
+run_simulation()
+
+# 单样本模式
+run_single_sample(
+    sample_id="S001",
+    side="R",
+    mesh_path=Path("data/clean_mesh/S001_R.ply"),
+    landmarks_path=Path("data/landmarks/S001_R_landmarks.csv"),
+    regions_csv=Path("config/region_table.csv"),
+    out_points=Path("output/parameterized_points/S001_R_points.csv"),
+    out_qc=Path("output/qc/S001_R_qc.csv"),
+    log_dir=Path("output/logs"),
+)
+```
 
 ---
 
 ## 算法详解
 
-以下是对照技术文档第 3 章，从输入到输出每一步的完整数学描述和代码实现说明。
+以下按 `core.py` 中 `process_region()` 的执行顺序，逐步解释每个子步骤的数学原理和代码逻辑。
 
-### 步骤 1：三角形退化检测
+### 步骤 0：三角形退化检测
 
-**目的**：确保三个 landmark 确定的三角形是有效的（不共线、面积非零）。
+**函数**：`_is_triangle_degenerate(a, b, c, eps=1e-6)`
 
-**数学定义**：
-
-设三角形三个顶点为 **A**, **B**, **C** ∈ ℝ³，计算：
-
-$$
-\vec{u} = \mathbf{B} - \mathbf{A}, \quad \vec{v} = \mathbf{C} - \mathbf{A}
-$$
-
-面积向量：
-
-$$
-\vec{S} = \vec{u} \times \vec{v}
-$$
-
-三角形面积（2 倍）：
-
-$$
-A = \|\vec{S}\|
-$$
-
-**退化判定**：若 $A < \varepsilon$（$\varepsilon = 10^{-6}$），则三点共线或重合，三角形退化，无法定义有效的参数域，直接抛出异常终止处理。
-
-**代码位置**：`ear_param/core.py` → `_is_triangle_degenerate()`
-
----
-
-### 步骤 2：源点裁剪（Mesh 顶点投影筛选）
-
-**目的**：从完整耳 mesh 的顶点集中，筛选出落在三角形区域投影范围内的顶点作为"源点"，这些源点将用于后续插值。
-
-**数学方法**：
-
-1. **顶点采样**（性能优化）：若 mesh 顶点数超过 `DENSE_SAMPLE_COUNT`（默认 5000），随机采样 5000 个顶点参与计算。
-2. **重心坐标计算**：对每个 mesh 顶点 **P** ∈ ℝ³，计算其在三角形 (**A**, **B**, **C**) 上的重心坐标 (λa, λb, λc)（计算方法详见 [步骤 3](#步骤-3重心坐标批量计算最小二乘投影)）。
-3. **范围筛选**：在容差范围内检查 λ 是否满足三角形内部条件：
-
-$$
-\lambda_a \in [-\tau, 1+\tau], \quad
-\lambda_b \in [-\tau, 1+\tau], \quad
-\lambda_c \in [-\tau, 1+\tau]
-$$
-
-其中容差 $\tau = 0.15$（`PROJECTION_TOL`），用于包容 mesh 顶点与理想三角形平面之间的微小偏差。
-
-**合格的源点**：满足上述范围约束的 mesh 顶点，即三维空间中投影到三角形内部（含容差边界）的点。
-
-**代码位置**：`ear_param/core.py` → `_clip_points_to_triangle()`
-
-> **注意**：tolerance 设为 0.15 而非 0，是因为实际 mesh 顶点不一定完全落在三角形平面上（耳朵表面有曲率），需要一定的容差来捕获三角形附近的顶点。
-
----
-
-### 步骤 3：重心坐标批量计算（最小二乘投影）
-
-**目的**：将任意三维点投影到三角形平面，并计算其在该平面上的重心坐标。这是整个参数化的数学核心，实现了 **3D → 2D 参数域** 的映射。
-
-**数学推导**：
-
-给定三角形顶点 **A**, **B**, **C** ∈ ℝ³，任意空间点 **P** ∈ ℝ³。
-
-#### 3.1 建立局部坐标系
-
-以 **A** 为原点，定义两个局部基向量：
-
-$$
-\mathbf{e}_1 = \mathbf{B} - \mathbf{A}, \quad \mathbf{e}_2 = \mathbf{C} - \mathbf{A}
-$$
-
-这两个向量张成三角形平面。
-
-#### 3.2 最小二乘投影
-
-设 **P** 在三角形平面上的投影点为 **P'**，其在局部坐标系中的坐标为 $(u, v)$：
-
-$$
-\mathbf{P}' = \mathbf{A} + u \cdot \mathbf{e}_1 + v \cdot \mathbf{e}_2
-$$
-
-投影残差向量：
-
-$$
-\mathbf{r} = \mathbf{P} - \mathbf{P}' = (\mathbf{P} - \mathbf{A}) - u\mathbf{e}_1 - v\mathbf{e}_2
-$$
-
-最小化残差平方和 $\|\mathbf{r}\|^2$（即正交投影），对 $u, v$ 求偏导并令其为 0，得到法方程：
-
-$$
-\begin{bmatrix}
-\mathbf{e}_1 \cdot \mathbf{e}_1 & \mathbf{e}_1 \cdot \mathbf{e}_2 \\
-\mathbf{e}_1 \cdot \mathbf{e}_2 & \mathbf{e}_2 \cdot \mathbf{e}_2
-\end{bmatrix}
-\begin{bmatrix} u \\ v \end{bmatrix}
-=
-\begin{bmatrix}
-(\mathbf{P} - \mathbf{A}) \cdot \mathbf{e}_1 \\
-(\mathbf{P} - \mathbf{A}) \cdot \mathbf{e}_2
-\end{bmatrix}
-$$
-
-即 **Gu = r**，其中 G 是 2×2 的 Gram 矩阵。
-
-#### 3.3 由 (u, v) 计算重心坐标
-
-重心坐标与局部坐标的对应关系：
-
-$$
-\lambda_b = u, \quad \lambda_c = v, \quad \lambda_a = 1 - \lambda_b - \lambda_c
-$$
-
-恒满足 $\lambda_a + \lambda_b + \lambda_c = 1$。
-
-#### 3.4 退化处理
-
-当三角形退化（$\det(G) < 10^{-12}$）时，所有点退化为三角形质心：
-
-$$
-\lambda_a = \lambda_b = \lambda_c = \frac{1}{3}
-$$
-
-**代码位置**：`ear_param/core.py` → `_barycentric_batch()`, `barycentric_3d()`
-
----
-
-### 步骤 4：固定分辨率重心坐标网格生成
-
-**目的**：在三角形参数域内生成均匀分布的目标采样网格点。这些网格点的重心坐标是纯数学计算，与具体 mesh 无关，保证了跨样本的一致性。
-
-**数学定义**：
-
-设采样分辨率为 $R$（`resolution`），步长 $\Delta = 1/R$。
-
-对于所有非负整数对 $(i, j)$ 满足 $i + j \leq R$，定义网格点的重心坐标为：
-
-$$
-\lambda_b(i, j) = i \cdot \Delta = \frac{i}{R}
-\qquad
-\lambda_c(i, j) = j \cdot \Delta = \frac{j}{R}
-\qquad
-\lambda_a(i, j) = 1 - \lambda_b - \lambda_c
-$$
-
-**网格点数**：
-
-遍历 $i = 0, 1, \ldots, R$，对每个 $i$，$j = 0, 1, \ldots, R - i$：
-
-$$
-N_{\text{total}} = \sum_{i=0}^{R} (R - i + 1) = \frac{(R + 1)(R + 2)}{2}
-$$
-
-当 $R = 8$ 时：$N = (9 \times 10) / 2 = 45$。
-
-**几何意义**：这些点均匀地覆盖了三角形参数域，构成了一个等间距的三角形网格：
-
-```
-        (0,R)                    λa=1
-         /\
-        /  \                    λb=0    λc=0
-       /    \
-      /      \        ← 共 (R+1)(R+2)/2 个等间距网格点
-     /        \
-    /__________\
- (R,0)        (0,R)
-
- λb=1          λc=1
+```python
+ab = b - a
+ac = c - a
+area_vec = np.cross(ab, ac)
+area = float(np.linalg.norm(area_vec))
+return area < eps
 ```
 
-遍历顺序为行优先（$i$ 先变化，$j$ 后变化），即先固定 $i=0$ 遍历所有 $j$，再 $i=1$，依此类推。
+- 计算三角形面积 = |(B−A) × (C−A)| / 2。
+- 若面积 < 1e-6，判定为退化（三点共线），无法建立投影平面，直接抛异常。
+- 正常三角形面积远大于此阈值（耳甲腔区域面积约 1~2 cm² = 100~200 mm²）。
 
-**代码位置**：`ear_param/core.py` → `make_barycentric_grid()`
+### 步骤 1：源点裁剪（Mesh 顶点投影筛选）
 
----
+**函数**：`_clip_points_to_triangle(points, a, b, c, tolerance=0.15)`
+
+**流程：**
+
+1. 调用 `_barycentric_batch()` 对每个 mesh 顶点计算重心坐标 (λ_a, λ_b, λ_c)。
+2. 筛选条件：每个 λ_i ∈ [−tolerance, 1+tolerance]，即允许顶点略微超出三角形边界。
+3. 返回裁剪后的顶点坐标和布尔掩码。
+
+**为什么需要 tolerance？**
+
+- 真实耳朵是曲面，mesh 顶点不完全落在三角形平面上。
+- 重心坐标由最小二乘投影计算，有数值误差。
+- 允许 vertices 略微超出三角形边界（如 λ_a = −0.02）可以避免丢失边缘上的有效点。
+- 当前 tolerance = 0.15（较宽松），可在 `config.py` 中调整。
+
+**采样优化：**
+
+- 若 mesh 顶点数 > 5000，随机抽取 5000 个顶点做重心计算（避免 O(N²) 耗时）。
+- 抽样使用固定种子（seed=42），保证可复现。
+
+### 步骤 2：重心坐标批量计算（最小二乘投影）
+
+**函数**：`_barycentric_batch(points, a, b, c)`
+
+**数学推导：**
+
+1. 以 A 为原点，建立局部坐标系：u⃗ = B − A，v⃗ = C − A。
+2. 对每个点 P_i，P_i − A 在 (u⃗, v⃗) 子空间的最小二乘投影坐标 (u_i, v_i) 满足 Gram 矩阵方程：
+
+```
+[ u⃗·u⃗   u⃗·v⃗ ] [ u_i ]   [ (P_i−A)·u⃗ ]
+[ u⃗·v⃗   v⃗·v⃗ ] [ v_i ] = [ (P_i−A)·v⃗ ]
+```
+
+3. 求解得 u_i, v_i，则：
+   - λ_b = u_i
+   - λ_c = v_i
+   - λ_a = 1 − λ_b − λ_c
+
+4. 若 Gram 矩阵行列式 ≈ 0（退化三角形），返回等重心坐标 (1/3, 1/3, 1/3)。
+
+**复杂度：** O(N)，使用矩阵运算一次处理所有点。
+
+### 步骤 3：固定分辨率重心坐标网格生成
+
+**函数**：`make_barycentric_grid(resolution)`
+
+```
+对 resolution = 8:
+  i 从 0 到 8:
+    j 从 0 到 8−i:
+      λ_b = i / 8
+      λ_c = j / 8
+      λ_a = 1 − λ_b − λ_c
+      保存 [λ_a, λ_b, λ_c]
+
+共 (8+1)×(8+2)/2 = 45 个点
+```
+
+**采样点排列顺序（行优先，j 变化快于 i）：**
+
+```
+i=0: (1.000, 0.000, 0.000)  (0.875, 0.000, 0.125)  ...  (0.000, 0.000, 1.000)
+i=1: (0.875, 0.125, 0.000)  (0.750, 0.125, 0.125)  ...  (0.000, 0.125, 0.875)
+...
+i=8: (0.000, 1.000, 0.000)
+```
+
+所有样本的所有区域使用**完全相同**的网格点，这是跨样本对齐的关键。
+
+### 步骤 4：源面片构建（保留原始 mesh 拓扑）
+
+**函数**：`_build_source_faces(sampled_vertices, sampled_lambdas, clip_mask, global_indices, full_faces, logger)`
+
+**流程：**
+
+1. 建立映射表：`global_vertex_index → clipped_local_index`（仅保留 clip_mask=True 的顶点）。
+2. 遍历原始 mesh 的所有面片（顶点三元组）。
+3. 若面片的三个顶点都出现在映射表中（即都被裁剪保留），则：
+   - 记录该面片三个顶点的 3D 坐标 → `face_triangles_3d`
+   - 记录该面片三个顶点的 (λ_b, λ_c) 参数坐标 → `face_triangles_2d`
+4. 返回两组数据。
+
+**为什么需要源面片？**
+
+v2.0 升级的关键。以前用 LinearNDInterpolator 在参数空间做 Delaunay 三角剖分再插值，但 Delaunay 会重新划分拓扑，可能导致跨解剖结构的错误插值。保留原始 mesh 面片就保证了插值严格在原始曲面拓扑内进行。
 
 ### 步骤 5：插值重建采样点三维坐标
 
-**目的**：已知源点（步骤 2 裁剪得到）的三维坐标及其重心坐标，反推出目标网格点（步骤 4 生成）在三维空间中的坐标。即 **2D 参数域 → 3D 空间** 的逆向映射。
+**函数**：`_interpolate_sample_points(source_points, source_lambdas, source_faces_3d, source_faces_2d, target_grid, logger)`
 
-**输入**：
-- 源点三维坐标 $\{\mathbf{P}_k\}_{k=1}^{M}$，$\mathbf{P}_k \in \mathbb{R}^3$
-- 源点重心坐标 $\{(\lambda_{a,k}, \lambda_{b,k}, \lambda_{c,k})\}_{k=1}^{M}$
-- 目标网格重心坐标 $\{(\hat{\lambda}_{a,t}, \hat{\lambda}_{b,t}, \hat{\lambda}_{c,t})\}_{t=1}^{N}$
+**这是 v2.0 的核心升级。分两层策略：**
 
-**输出**：目标网格点的三维坐标 $\{\hat{\mathbf{P}}_t\}_{t=1}^{N}$
+#### 首选策略：面片感知 Point-in-Triangle 插值
 
-#### 方法 1：LinearNDInterpolator（主要方法）
+对每个目标网格点 `(λ_a, λ_b, λ_c)`：
 
-在重心坐标参数空间中，使用线性 N 维插值器。
+1. 取其参数坐标 `(λ_b, λ_c)`。
+2. 遍历所有源面片的 2D 投影（包围盒快速剔除后，做精确 point-in-triangle 测试）。
+3. 若找到包含该点的面片，用面片的三个顶点 3D 坐标和该点在面片内的重心坐标做线性插值：
 
-由于重心坐标满足 $\lambda_a + \lambda_b + \lambda_c = 1$，实际只需 2 个自由度。选取 $(\lambda_b, \lambda_c)$ 作为参数空间的独立坐标（$\lambda_a$ 由约束确定），在 $(\lambda_b, \lambda_c) \in \mathbb{R}^2$ 空间中进行分段线性插值：
+```
+P_3d = α·V0_3d + β·V1_3d + γ·V2_3d
+```
 
-$$
-\hat{\mathbf{P}}_t = \text{Interp}\big(\hat{\lambda}_{b,t}, \hat{\lambda}_{c,t} \mid \{(\lambda_{b,k}, \lambda_{c,k}) \to \mathbf{P}_k\}\big)
-$$
+其中 (α, β, γ) 是目标点在面片 2D 投影内的重心坐标。
 
-**实现**：使用 `scipy.interpolate.LinearNDInterpolator`，基于 Delaunay 三角剖分在 $(\lambda_b, \lambda_c)$ 参数空间中插值。
+#### 兜底策略：参数空间最近邻
 
-**可能出现 NaN 的情况**：当目标网格点位于源点构成的凸包之外时（例如三角形边缘区域源点稀疏），线性插值器无法外推，返回 NaN。
+若目标点未落入任何源面片（典型情况：三角形边缘区域、面片覆盖不足）：
 
-#### 方法 2：cKDTree 最近邻兜底（兜底方法）
+1. 在参数空间 `(λ_b, λ_c)` 中找最近源点。
+2. 直接使用最近源点的 3D 坐标。
 
-对于插值失败的 NaN 点，使用以下策略：
+**为什么用参数空间最近邻而非 3D 最近邻？**
 
-1. 在参数空间中，计算目标点与所有源点在 $(\lambda_b, \lambda_c)$ 空间中的欧氏距离
-2. 选取距离最近的那个源点的三维坐标作为替代值
+3D 最近邻可能匹配到空间上近但解剖位置不同的点（如耳甲腔的点匹配到耳屏），参数空间最近邻保证匹配的是同一解剖约束范围内的点。
 
-$$
-\hat{\mathbf{P}}_t = \mathbf{P}_{k^*}, \quad \text{其中 } k^* = \underset{k}{\arg\min} \; \|(\hat{\lambda}_{b,t}, \hat{\lambda}_{c,t}) - (\lambda_{b,k}, \lambda_{c,k})\|
-$$
+**退化方案（源点过少时）：**
 
-**统计记录**：兜底使用的点数占总目标点数的比例称为 **fallback_ratio**，是 QC 质量评估的核心指标。
-
-#### 方法 3：顶点直接插值（源点过少时）
-
-当源点数量少于 `MIN_SOURCE_POINTS`（默认 5）时，无法进行有效的插值。此时使用三角形三个顶点直接线性组合：
-
-$$
-\hat{\mathbf{P}}_t = \lambda_a \cdot \mathbf{A} + \lambda_b \cdot \mathbf{B} + \lambda_c \cdot \mathbf{C}
-$$
-
-这是三角形平面上的精确点，但不一定落在 mesh 表面上（mesh 有曲率），仅作为退化的兜底方案。
-
-**代码位置**：`ear_param/core.py` → `_interpolate_sample_points()`
-
----
+若区域内源点 < 5，直接从三角形顶点做加权插值（平面三角形近似），不计入正常插值统计。
 
 ### 步骤 6：QC 质量评估
 
-**目的**：评估每个区域的采样质量，确保插值重建的可靠性。
+**判定逻辑：**
 
-**核心指标**：`fallback_ratio` — 使用了最近邻兜底（方法 2）的采样点比例。
+```
+fallback_ratio = n_fallback / n_target
 
-**判定标准**：
+if fallback_ratio ≤ 0.05:    → PASS   ✅  面片覆盖良好
+elif fallback_ratio ≤ 0.20:  → WARN   ⚠️  边缘区域覆盖不足
+else:                        → FAIL   ❌  三角形区域可能定义不当或 mesh 质量差
+```
 
-| 条件 | 状态 | 含义 |
-|------|:---:|------|
-| $\text{fallback\_ratio} \leq 5\%$ | ✅ **PASS** | 绝大多数点通过线性插值成功重建，采样质量良好 |
-| $5\% < \text{fallback\_ratio} \leq 20\%$ | ⚠️ **WARNING** | 较多点需要兜底，建议关注该区域源点密度 |
-| $\text{fallback\_ratio} > 20\%$ | ❌ **FAIL** | 插值大面积失败，该区域采样结果不可靠 |
-
-**阈值配置**：`ear_param/config.py` → `FALLBACK_WARNING_THRESHOLD`, `FALLBACK_FAIL_THRESHOLD`
+QC 记录中额外记录了 `source_point_count`（区域内源点数）和 `source_face_count`（区域内源面片数），便于回溯诊断。
 
 ---
 
-## 项目结构
+## 执行入口说明
 
-```
-ear_project/
-├── README.md                        ← 本文件
-├── requirements.txt                 ← Python 依赖
-├── config/
-│   └── region_table.csv             ← 区域定义表（用户编辑）
-├── ear_param/                       ← 核心包
-│   ├── __init__.py
-│   ├── config.py                    ← 全局配置与常量
-│   ├── core.py                      ← 核心算法（裁剪/投影/采样/插值/QC）
-│   ├── io_utils.py                  ← 文件 IO 与日志
-│   ├── synthetic.py                 ← 模拟数据生成（无真实数据时使用）
-│   └── run.py                       ← 流程编排（批量/单样本）
-├── scripts/
-│   └── parameterize_ear.py          ← 命令行入口
-├── data/                            ← 自动生成（模拟模式）
-│   ├── clean_mesh/                  ← 耳 mesh (.ply)
-│   └── landmarks/                   ← 特征点 (.csv)
-└── output/                          ← 自动生成
-    ├── parameterized_points/        ← 采样点 (.csv)
-    ├── qc/                          ← QC 报告 (.csv)
-    └── logs/                        ← 运行日志 (.log)
-```
+`scripts/parameterize_ear.py` 是整个项目的唯一命令行入口。
 
----
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-依赖包：`numpy`, `pandas`, `scipy`, `trimesh`
-
-### 2. 模拟模式（无真实数据时测试）
-
-```bash
-cd ear_project
+```python
+# 无参数 → 模拟模式
 python scripts/parameterize_ear.py
+
+# 带参数 → 单样本模式
+python scripts/parameterize_ear.py --sample_id S001 --side R --mesh ... --landmarks ...
 ```
 
-自动生成 3 个模拟样本（S001–S003），完成参数化，输出到 `output/` 目录。
+**调用链：**
 
-模拟数据说明：
-- 使用标准耳朵外形（宽 35mm、高 60mm、深 15mm）生成基础 mesh
-- 每个样本使用不同的随机种子（42 / 123 / 999）引入个体差异
-- 每个样本施加不同水平的噪声（0.25 / 0.35 / 0.28）模拟扫描误差
-- 生成 13 个特征点（L02, L07, L10, L13, L15, L19, L20, L21, L26, L28, L29, L30, L31）
-
-### 3. 真实数据模式（拿到数据后）
-
-```bash
-# 单样本
-python scripts/parameterize_ear.py \
-    --sample_id S001 --side R \
-    --mesh data/clean_mesh/S001_R.ply \
-    --landmarks data/landmarks/S001_R_landmarks.csv \
-    --regions config/region_table.csv \
-    --out_points output/parameterized_points/S001_R_points.csv \
-    --out_qc output/qc/S001_R_qc.csv
-
-# 批量处理
-python scripts/parameterize_ear.py \
-    --batch data/samples.csv \
-    --regions config/region_table.csv
+```
+scripts/parameterize_ear.py
+  │
+  ├─ 无参数 ──▶ ear_param/run.py → run_simulation()
+  │                ├── ear_param/synthetic.py → generate_all_simulated_data()
+  │                ├── ear_param/io_utils.py  → load_mesh(), load_landmarks(), read_csv_robust()
+  │                └── ear_param/core.py      → process_region() × 区域数 × 样本数
+  │
+  └─ 有参数 ──▶ ear_param/run.py → run_single_sample()
+                   ├── ear_param/io_utils.py  → load_mesh(), load_landmarks()
+                   └── ear_param/core.py      → process_region() × 区域数
 ```
 
-其中 `data/samples.csv` 格式：
+---
+
+## 日志系统
+
+### 设计思路
+
+- **双通道输出**：控制台看关键进展（INFO），文件记录全部细节（DEBUG）。
+- **每样本独立日志**：不同样本的日志写入不同文件，互不干扰。
+- **时间戳命名**：`{sample_id}_{side}_parameterize_{YYYYMMDD}_{HHMMSS}.log`，不会覆盖历史日志。
+
+### 日志格式
+
+```
+2026-07-06 10:00:01 | INFO    | [S001_R] 处理区域 T001: 耳甲腔上区
+2026-07-06 10:00:01 | DEBUG   |     三角形顶点: A(L10)=[12.3, -5.1, 8.7], ...
+2026-07-06 10:00:01 | DEBUG   |     源点数: 264 (从 1500 个顶点中裁剪)
+2026-07-06 10:00:01 | DEBUG   |     源面片数: 150
+2026-07-06 10:00:01 | DEBUG   |     目标采样网格: resolution=8, 点数=45
+2026-07-06 10:00:01 | DEBUG   |     point-in-triangle: 45/45 成功, 0 个点使用最近邻兜底
+2026-07-06 10:00:01 | INFO    |     -> 源点=264, 源面片=150, 采样点=45, 兜底=0(0.0%), 状态=PASS
+```
+
+### 日志查找指南
+
+| 想看什么 | 去哪里 |
+|----------|--------|
+| 整体运行状态 | `SIMULATION_ALL_*.log`（INFO 级别即可） |
+| 某个样本为什么 FAIL | 该样本的 `{sample_id}_R_*.log`，搜索 "FAIL" 或 "兜底" |
+| 某个区域的具体源点数 | 搜索 "源点数" |
+| 兜底插值详情 | 搜索 "最近邻兜底" |
+
+---
+
+## 配置参数速查
+
+所有参数集中在 `ear_param/config.py`：
+
+| 参数 | 默认值 | 说明 | 调参建议 |
+|------|:---:|------|------|
+| `PROJECTION_TOL` | 0.15 | 裁剪容差（允许 λ 超出 [0,1] 的幅度） | 源点太少 → 增大；误入太多 → 减小 |
+| `FALLBACK_WARNING_THRESHOLD` | 0.05 | 兜底比例 WARNING 线 | — |
+| `FALLBACK_FAIL_THRESHOLD` | 0.20 | 兜底比例 FAIL 线 | — |
+| `MIN_SOURCE_POINTS` | 5 | 最小源点数（低于此走退化方案） | 视 mesh 精度而定 |
+| `DENSE_SAMPLE_COUNT` | 5000 | 大 mesh 的随机采样上限 | 性能 vs 精度权衡 |
+| `SIMULATED_SAMPLES` | ["S001","S002","S003"] | 模拟样本数 | 增减以测试不同场景 |
+| `SIMULATED_NOISE_LEVELS` | [0.25,0.35,0.28] | 各样本噪声幅度（mm） | 模拟个体差异程度 |
+
+---
+
+## 模拟数据说明
+
+### 耳朵参数曲面
+
+`synthetic.py` 使用参数曲面 `F(u, v) → (x, y, z)` 生成模拟耳朵，包含以下解剖结构：
+
+| 结构 | 参数范围 | 效果 |
+|------|----------|------|
+| 基础椭圆 | u,v ∈ [0,1] | 耳朵基础外形（35mm × 60mm） |
+| 耳甲腔凹陷 | u∈[0.3,0.7], v∈[0.4,0.7] | 中央深度凹陷 |
+| 耳屏突起 | u∈[0.6,0.75], v∈[0.3,0.5] | 前方小突起 |
+| 三角窝凹陷 | u∈[0.35,0.65], v∈[0.65,0.85] | 上方凹陷 |
+| 耳垂 | u∈[0.35,0.65], v∈[0.0,0.15] | 下方圆润突起 |
+
+### 样本间差异
+
+| 参数 | S001 | S002 | S003 |
+|------|:---:|:---:|:---:|
+| seed | 42 | 123 | 999 |
+| noise_level | 0.25 | 0.35 | 0.28 |
+| 顶点数 | 1500 | 1500 | 1500 |
+
+三个样本共享相同的 landmark 位置（在参数空间中的预定义 (u, v) 坐标），但曲面本身因 seed 不同而形状各异。
+
+### Landmarks 在参数空间中的位置
+
+```
+L10: (0.50, 0.55)  ← 耳甲腔中心（三角形公共顶点）
+L15: (0.52, 0.20)  ← 对耳屏边缘
+L19: (0.72, 0.45)  ← 耳屏上方
+L20: (0.68, 0.38)  ← 对耳屏上方
+L21: (0.70, 0.42)  ← 耳屏-对耳屏交界
+L28: (0.38, 0.65)  ← 耳甲腔上缘
+L29: (0.30, 0.72)  ← 耳甲腔上外缘
+L30: (0.35, 0.40)  ← 耳甲腔前下缘
+L31: (0.50, 0.35)  ← 耳甲腔下缘
+```
+
+---
+
+## FAQ & 常见问题
+
+### Q1：程序报 `特征点缺失: {...}` 错误？
+
+区域定义表引用的 landmark ID 在 landmarks CSV 中不存在。检查：
+- landmarks CSV 的 `landmark_id` 列是否包含所有 9 个所需 ID。
+- 确保 CSV 格式正确（逗号分隔，UTF-8 编码）。
+
+### Q2：某个区域的状态是 FAIL，怎么办？
+
+FAIL 表示兜底插值比例超过 20%。可能原因和解决方案：
+
+| 原因 | 诊断方法 | 解决 |
+|------|----------|------|
+| 三角形区域定义的 landmark 位置不准 | 检查 landmark 的 3D 坐标是否合理 | 修正 landmark 标注 |
+| Mesh 在该区域面片稀疏 | 查看 `source_face_count` 是否 < 10 | 提高 mesh 分辨率 |
+| 三角形区域过大 | 查看区域长度是否 > 40mm | 拆分区域或降低 resolution |
+| 容差太小 | 查看 `source_point_count` 是否很低 | 增大 `PROJECTION_TOL` |
+
+### Q3：为什么采样点数和预期不一样？
+
+正常情况下 `sample_point_count == expected_point_count`。若不等，可能是源点不足导致走了退化方案（此时会输出一条 warning 日志）。
+
+### Q4：模拟模式生成的 mesh 和 landmarks 在哪儿？
+
+- Mesh：`data/clean_mesh/S00X_R.ply`
+- Landmarks：`data/landmarks/S00X_R_landmarks.csv`
+
+模拟模式每次运行都会**覆盖**这些文件。
+
+### Q5：如何添加新的三角区域？
+
+编辑 `config/region_table.csv`，新增一行即可：
 
 ```csv
-sample_id,mesh_path,landmark_path,output_points,output_qc
-S001,data/clean_mesh/S001_R.ply,data/landmarks/S001_R_landmarks.csv,output/parameterized_points/S001_R_points.csv,output/qc/S001_R_qc.csv
-S002,data/clean_mesh/S002_R.ply,data/landmarks/S002_R_landmarks.csv,output/parameterized_points/S002_R_points.csv,output/qc/S002_R_qc.csv
+region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
+T006,新区域名,L10,L20,L15,8,1
 ```
 
----
+无需修改任何代码。
 
-## 配置参数速查（`ear_param/config.py`）
+### Q6：如何调整采样密度？
 
-| 参数 | 默认值 | 说明 |
-|------|:---:|------|
-| `PROJECTION_TOL` | 0.15 | 重心坐标允许超出 [0, 1] 的容差范围。增大可捕获更多边缘源点，但可能引入三角形外的噪声 |
-| `FALLBACK_WARNING_THRESHOLD` | 0.05 | 兜底比例超过 5% 触发 WARNING |
-| `FALLBACK_FAIL_THRESHOLD` | 0.20 | 兜底比例超过 20% 触发 FAIL |
-| `MIN_SOURCE_POINTS` | 5 | 三角区域内源点最小数量，低于此值无法进行线性插值，退化为顶点直接插值 |
-| `DENSE_SAMPLE_COUNT` | 5000 | mesh 顶点采样上限，用于大 mesh 的性能优化。设为 `None` 可使用全部顶点 |
-| `SIMULATED_NOISE_LEVELS` | [0.25, 0.35, 0.28] | 模拟样本的噪声水平（标准差，mm） |
-| `SIMULATED_SEEDS` | [42, 123, 999] | 模拟样本的随机种子 |
+修改 `config/region_table.csv` 中对应区域的 `resolution` 即可：
+
+| resolution | 采样点数 |
+|:---:|:---:|
+| 4 | 15 |
+| 6 | 28 |
+| 8 | 45 |
+| 10 | 66 |
+| 12 | 91 |
+| 16 | 153 |
+
+### Q7：v2.0 和之前的版本有什么区别？
+
+| 方面 | v1.0 | v2.0 |
+|------|------|------|
+| 插值器 | LinearNDInterpolator（Delaunay 重建） | Point-in-Triangle（原始 mesh 面片） |
+| 拓扑保留 | 否（Delaunay 会重建拓扑） | 是（严格使用原始面片） |
+| 兜底策略 | 3D 最近邻 | 参数空间最近邻 |
+| 跨结构映射风险 | 有（3D 最近邻可能跳区） | 无（参数空间最近邻） |
 
 ---
 
 ## 下一步工作
 
-当你拿到真实数据后，需要准备：
-
-1. **耳 mesh 文件**
-   - 格式：`.ply`（推荐）、`.obj` 或 `.stl`
-   - 命名规范：`{sample_id}_{side}.ply`（如 `S001_R.ply`）
-   - 放置在 `data/clean_mesh/` 目录下
-
-2. **特征点 CSV**
-   - 必须包含列：`landmark_id, x, y, z`
-   - 命名规范：`{sample_id}_{side}_landmarks.csv`
-   - 放置在 `data/landmarks/` 目录下
-
-3. **检查 landmark 覆盖**
-   - 确保 CSV 包含 `config/region_table.csv` 中所有引用的 landmark
-   - 当前必须包含：L10, L15, L19, L20, L21, L28, L29, L30, L31
-
-4. **如需自定义区域**
-   - 编辑 `config/region_table.csv`，增减行即可
-   - 每行格式：`region_id, region_name, lm_a, lm_b, lm_c, resolution, use_for_pca`
-   - `resolution` 决定每区点数：`resolution=8 → 45 点`，`resolution=6 → 28 点`
-
-5. **如需调参**
-   - 编辑 `ear_param/config.py` 中的容差和阈值
-   - 常见调节：若源点不足导致大量 WARNING，可适当增大 `PROJECTION_TOL`
-
-6. **运行**
-   - 按真实数据模式运行，每个样本生成一份采样点 CSV + QC 报告
-   - 检查 QC 报告中 `status` 列，确保所有区域为 PASS
+1. ~~**二维展开 (UV Unwrapping)**~~ ✅ 已完成：采样点的 u, v 坐标已基于重心坐标 (λ_b, λ_c) 通过仿射变换实际计算。
+2. **PCA 特征值分析**：堆叠所有样本的采样点为数据矩阵，执行 PCA 降维。
+3. **区域补丁文件支持**：允许用独立的 patch mesh 替代三角形裁剪（处理 landmark 定义无法完全覆盖目标区域的情况）。
+4. **空间索引加速**：当面片数较大时，对源面片的 2D 投影使用 R-tree 或网格索引加速 point-in-triangle 查询。
+5. **并行化**：不同样本的参数化完全独立，可用 multiprocessing 并行处理。
+6. **可视化工具**：输出 ply 文件 + 颜色编码区域，便于在 MeshLab 中检查。

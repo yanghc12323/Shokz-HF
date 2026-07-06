@@ -1,1 +1,0 @@
-# ear_param - 3D ear model parameterization toolkit
