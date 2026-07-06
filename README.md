@@ -287,11 +287,11 @@ $$
 对于所有非负整数对 $(i, j)$ 满足 $i + j \leq R$，定义网格点的重心坐标为：
 
 $$
-\begin{aligned}
-\lambda_b(i, j) &= i \cdot \Delta = \frac{i}{R} \\
-\lambda_c(i, j) &= j \cdot \Delta = \frac{j}{R} \\
-\lambda_a(i, j) &= 1 - \lambda_b - \lambda_c = 1 - \frac{i + j}{R}
-\end{aligned}
+\lambda_b(i, j) = i \cdot \Delta = \frac{i}{R}
+\qquad
+\lambda_c(i, j) = j \cdot \Delta = \frac{j}{R}
+\qquad
+\lambda_a(i, j) = 1 - \lambda_b - \lambda_c
 $$
 
 **网格点数**：
@@ -358,7 +358,7 @@ $$
 2. 选取距离最近的那个源点的三维坐标作为替代值
 
 $$
-\hat{\mathbf{P}}_t = \mathbf{P}_{k^*}, \quad \text{其中 } k^* = \operatorname*{argmin}_{k} \|(\hat{\lambda}_{b,t}, \hat{\lambda}_{c,t}) - (\lambda_{b,k}, \lambda_{c,k})\|
+\hat{\mathbf{P}}_t = \mathbf{P}_{k^*}, \quad \text{其中 } k^* = \underset{k}{\arg\min} \; \|(\hat{\lambda}_{b,t}, \hat{\lambda}_{c,t}) - (\lambda_{b,k}, \lambda_{c,k})\|
 $$
 
 **统计记录**：兜底使用的点数占总目标点数的比例称为 **fallback_ratio**，是 QC 质量评估的核心指标。
