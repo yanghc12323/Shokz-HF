@@ -459,6 +459,14 @@ def process_region(
         该区域的参数化结果表, 包含所有采样点.
     qc_record : dict
         该区域的 QC 记录.
+    region_detail : dict
+        中间数据, 供可视化使用, 包含:
+          - 'source_lambdas':  源点重心坐标 (M, 3)
+          - 'source_points_3d': 裁剪后的源点三维坐标 (M, 3)
+          - 'target_grid':     目标采样网格重心坐标 (K, 3)
+          - 'reconstructed':   重建的三维坐标 (K, 3)
+          - 'fallback_mask':   兜底标记 (K,)
+          - 'region_name':     区域名称
     """
     logger.info(f"  [{sample_id}_{side}] 处理区域 {region['region_id']}: {region['region_name']}")
 
@@ -584,4 +592,23 @@ def process_region(
         "status": status,
     }
 
-    return df_region, qc_record
+    # 10. 构造可视化中间数据
+    # 注: target_grid_bc / sample_points_3d / a_3d 等键名供 visualization.py 使用
+    region_detail = {
+        "region_name": str(region["region_name"]),
+        "a_3d": a,
+        "b_3d": b,
+        "c_3d": c,
+        "lm_a": str(region["lm_a"]),
+        "lm_b": str(region["lm_b"]),
+        "lm_c": str(region["lm_c"]),
+        "source_lambdas": source_lambdas,
+        "source_points_3d": clipped,
+        "target_grid": target_grid,
+        "target_grid_bc": target_grid,
+        "reconstructed": reconstructed,
+        "sample_points_3d": reconstructed,
+        "fallback_mask": fallback_mask,
+    }
+
+    return df_region, qc_record, region_detail

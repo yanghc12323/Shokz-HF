@@ -158,9 +158,10 @@ N = (r + 1)(r + 2) / 2 = 9 × 10 / 2 = 45
 ├── ear_param/                   ← 核心 Python 包
 │   ├── __init__.py              ← 包初始化
 │   ├── config.py                ← 全局配置常量
-│   ├── core.py                  ← ★ 核心算法（退化检测/投影/面片构建/插值/QC/UV 展开）
+│   ├── core.py                  ← ★ 核心算法（退化检测/投影/插值/QC/UV 展开）
 │   ├── synthetic.py             ← 模拟数据生成
 │   ├── io_utils.py              ← 文件 I/O 与日志系统
+│   ├── visualization.py         ← 可视化（网格图/散点图/3D 概览/QC 热力图）
 │   └── run.py                   ← 流程编排（模拟模式 + 单样本模式）
 │
 ├── scripts/
@@ -173,6 +174,7 @@ N = (r + 1)(r + 2) / 2 = 9 × 10 / 2 = 45
 └── output/                      ← 输出目录（运行时自动创建）
     ├── parameterized_points/    ←   采样点 CSV
     ├── qc/                      ←   QC 报告 CSV
+    ├── figures/                 ←   可视化图片 (.png)
     └── logs/                    ←   运行日志 .log
 ```
 

@@ -36,6 +36,7 @@ from .config import (
     DIR_OUTPUT_POINTS,
     DIR_OUTPUT_QC,
     DIR_OUTPUT_LOGS,
+    DIR_OUTPUT_FIGURES,
     PATH_REGION_TABLE,
 )
 from .io_utils import (
@@ -46,6 +47,7 @@ from .io_utils import (
 )
 from .core import process_region
 from .synthetic import generate_all_simulated_data
+from .visualization import visualize_sample, visualize_qc_summary
 
 
 # ============================================================================
@@ -54,18 +56,21 @@ from .synthetic import generate_all_simulated_data
 
 def _ensure_dirs(
     project_root: Path,
-) -> tuple[Path, Path, Path, Path, Path, Path]:
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     """创建并返回所有输出目录."""
     clean_mesh_dir = project_root / DIR_CLEAN_MESH
     landmarks_dir = project_root / DIR_LANDMARKS
     output_points_dir = project_root / DIR_OUTPUT_POINTS
     output_qc_dir = project_root / DIR_OUTPUT_QC
+    output_figures_dir = project_root / DIR_OUTPUT_FIGURES
     log_dir = project_root / DIR_OUTPUT_LOGS
 
-    for d in [clean_mesh_dir, landmarks_dir, output_points_dir, output_qc_dir, log_dir]:
+    for d in [clean_mesh_dir, landmarks_dir, output_points_dir, output_qc_dir,
+              output_figures_dir, log_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    return clean_mesh_dir, landmarks_dir, output_points_dir, output_qc_dir, log_dir
+    return clean_mesh_dir, landmarks_dir, output_points_dir, output_qc_dir, \
+        output_figures_dir, log_dir
 
 
 # ============================================================================
@@ -95,7 +100,7 @@ def run_simulation(
 
     (
         clean_mesh_dir, landmarks_dir,
-        output_points_dir, output_qc_dir, log_dir,
+        output_points_dir, output_qc_dir, output_figures_dir, log_dir,
     ) = _ensure_dirs(project_root)
 
     # 设置主日志
@@ -132,6 +137,7 @@ def run_simulation(
         regions=regions,
         output_points_dir=output_points_dir,
         output_qc_dir=output_qc_dir,
+        output_figures_dir=output_figures_dir,
         log_dir=log_dir,
         main_logger=main_logger,
     )
@@ -206,7 +212,7 @@ def run_single_sample(
         raise ValueError(f"特征点缺失: {missing_lms}")
 
     # 参数化
-    all_points, qc_list = _parameterize_sample(
+    all_points, qc_list, region_details = _parameterize_sample(
         sample_id=sample_id,
         side=side,
         mesh=mesh,
@@ -244,6 +250,7 @@ def _batch_parameterize(
     regions: pd.DataFrame,
     output_points_dir: Path,
     output_qc_dir: Path,
+    output_figures_dir: Path,
     log_dir: Path,
     main_logger: logging.Logger,
 ) -> None:
@@ -266,6 +273,8 @@ def _batch_parameterize(
         采样点输出目录.
     output_qc_dir : Path
         QC 输出目录.
+    output_figures_dir : Path
+        可视化图片输出目录.
     log_dir : Path
         日志目录.
     main_logger : logging.Logger
@@ -276,6 +285,7 @@ def _batch_parameterize(
     main_logger.info("=" * 60)
 
     all_qc_summaries: list[dict] = []
+    all_region_details: dict[str, dict[str, list]] = {}  # {sample_id: {region_name: [detail1, ...]}}
 
     for sample_id in sample_ids:
         mesh_path = clean_mesh_dir / f"{sample_id}_{side}.ply"
@@ -309,7 +319,7 @@ def _batch_parameterize(
                 raise ValueError(f"特征点缺失: {missing_lms}")
 
             # 参数化
-            all_points, qc_list = _parameterize_sample(
+            all_points, qc_list, region_details = _parameterize_sample(
                 sample_id=sample_id,
                 side=side,
                 mesh=mesh,
@@ -322,6 +332,21 @@ def _batch_parameterize(
             df_all = pd.concat(all_points, ignore_index=True)
             df_all.to_csv(out_points, index=False)
             pd.DataFrame(qc_list).to_csv(out_qc, index=False)
+
+            # 保存可视化中间数据供后续使用
+            all_region_details[sample_id] = region_details
+
+            # 可视化
+            _ = _generate_visualizations(
+                sample_id=sample_id,
+                side=side,
+                mesh=mesh,
+                lms=lms,
+                qc_list=qc_list,
+                region_details=region_details,
+                output_figures_dir=output_figures_dir,
+                logger=sample_logger,
+            )
 
             # QC 摘要
             qc_df = pd.DataFrame(qc_list)
@@ -357,7 +382,8 @@ def _batch_parameterize(
             })
 
     # 最终摘要
-    _print_final_summary(all_qc_summaries, output_points_dir, output_qc_dir, log_dir, main_logger)
+    _print_final_summary(all_qc_summaries, output_points_dir, output_qc_dir,
+                         output_figures_dir, log_dir, main_logger)
 
 
 # ============================================================================
@@ -371,7 +397,7 @@ def _parameterize_sample(
     lms: pd.DataFrame,
     regions: pd.DataFrame,
     logger: logging.Logger,
-) -> tuple[list[pd.DataFrame], list[dict]]:
+) -> tuple[list[pd.DataFrame], list[dict], dict[str, dict]]:
     """
     对单个样本的所有区域执行参数化.
 
@@ -395,16 +421,19 @@ def _parameterize_sample(
     all_points : list[pd.DataFrame]
         各区域的采样点 DataFrame 列表.
     qc_list : list[dict]
-        各区域的 QC 记录列表.
+        各区域的 QC 记录列表, 包含 'sample_id' 字段.
+    region_details : dict[str, dict]
+        各区域的中间数据, 键为 region_name, 供可视化使用.
     """
     all_points: list[pd.DataFrame] = []
     qc_list: list[dict] = []
+    region_details: dict[str, dict] = {}
     global_id = 0
 
     for _, row in regions.iterrows():
         region = row.to_dict()
         try:
-            df_region, qc = process_region(
+            df_region, qc, detail = process_region(
                 sample_id=sample_id,
                 side=side,
                 full_mesh=mesh,
@@ -413,12 +442,16 @@ def _parameterize_sample(
                 global_start_id=global_id,
                 logger=logger,
             )
+            # 注入 sample_id
+            qc["sample_id"] = sample_id
             all_points.append(df_region)
             qc_list.append(qc)
+            region_details[str(region.get("region_name", ""))] = detail
             global_id += len(df_region)
         except Exception as e:
             logger.error(f"区域 {region.get('region_id', '?')} 处理失败: {e}")
             qc_list.append({
+                "sample_id": sample_id,
                 "region_id": str(region.get("region_id", "?")),
                 "region_name": str(region.get("region_name", "")),
                 "used_patch_file": False,
@@ -434,7 +467,67 @@ def _parameterize_sample(
             })
             continue
 
-    return all_points, qc_list
+    return all_points, qc_list, region_details
+
+
+# ============================================================================
+# 可视化生成封装
+# ============================================================================
+
+def _generate_visualizations(
+    sample_id: str,
+    side: str,
+    mesh: trimesh.Trimesh,
+    lms: pd.DataFrame,
+    qc_list: list[dict],
+    region_details: dict[str, dict],
+    output_figures_dir: Path,
+    logger: logging.Logger,
+) -> list[Path]:
+    """
+    为单个样本生成全部可视化图片.
+
+    Parameters
+    ----------
+    sample_id : str
+        样本编号.
+    side : str
+        左右侧.
+    mesh : trimesh.Trimesh
+        耳 mesh.
+    lms : pd.DataFrame
+        特征点表.
+    qc_list : list[dict]
+        QC 记录列表.
+    region_details : dict[str, dict]
+        各区域中间数据, 键为 region_name.
+    output_figures_dir : Path
+        图片输出目录.
+    logger : logging.Logger
+        日志记录器.
+
+    Returns
+    -------
+    saved_paths : list[Path]
+        生成的所有图片文件路径列表.
+    """
+    saved_paths: list[Path] = []
+
+    try:
+        saved_paths.extend(visualize_sample(
+            sample_id=sample_id,
+            side=side,
+            mesh=mesh,
+            lms=lms,
+            region_details=region_details,
+            output_figures_dir=output_figures_dir,
+            logger=logger,
+        ))
+        logger.info(f"  可视化: 样本图片已生成 ({len(saved_paths)} 张)")
+    except Exception as e:
+        logger.error(f"  可视化: 样本图片生成失败: {e}")
+
+    return saved_paths
 
 
 # ============================================================================
@@ -445,6 +538,7 @@ def _print_final_summary(
     all_qc_summaries: list[dict],
     output_points_dir: Path,
     output_qc_dir: Path,
+    output_figures_dir: Path,
     log_dir: Path,
     logger: logging.Logger,
 ) -> None:
@@ -463,7 +557,8 @@ def _print_final_summary(
         )
 
     logger.info(f"\n输出目录:")
-    logger.info(f"  点云: {output_points_dir}")
-    logger.info(f"  QC:   {output_qc_dir}")
-    logger.info(f"  日志: {log_dir}")
+    logger.info(f"  点云:   {output_points_dir}")
+    logger.info(f"  QC:     {output_qc_dir}")
+    logger.info(f"  图片:   {output_figures_dir}")
+    logger.info(f"  日志:   {log_dir}")
     logger.info("=" * 60)

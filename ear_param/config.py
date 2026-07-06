@@ -65,6 +65,7 @@ DIR_LANDMARKS: str = "data/landmarks"
 DIR_OUTPUT_POINTS: str = "output/parameterized_points"
 DIR_OUTPUT_QC: str = "output/qc"
 DIR_OUTPUT_LOGS: str = "output/logs"
+DIR_OUTPUT_FIGURES: str = "output/figures"
 
 # 区域定义表路径
 PATH_REGION_TABLE: str = "config/region_table.csv"
