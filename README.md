@@ -1,7 +1,7 @@
 # 3D 耳模型跨模型参数化 — 参数化采样与降采样模块
 
 > 技术依据：《人头给你了-3D 耳模型跨模型参数化与特征值计算技术执行文档-v0.0》第 3 章  
-> 最后更新：2026-07-06
+> 最后更新：2026-07-07
 
 ---
 
@@ -161,8 +161,13 @@ N = (r + 1)(r + 2) / 2 = 9 × 10 / 2 = 45
 │   ├── core.py                  ← ★ 核心算法（退化检测/投影/插值/QC/UV 展开）
 │   ├── synthetic.py             ← 模拟数据生成
 │   ├── io_utils.py              ← 文件 I/O 与日志系统
-│   ├── visualization.py         ← 可视化（网格图/散点图/3D 概览/QC 热力图）
+│   ├── visualization.py         ← 可视化（网格图/散点图/3D 概览/QC 热力图/Atlas 总图）
 │   └── run.py                   ← 流程编排（模拟模式 + 单样本模式）
+│
+├── tests/                       ← 单元测试套件 (73 个测试)
+│   ├── __init__.py
+│   ├── conftest.py              ← 共享 fixtures
+│   └── test_core.py             ← core.py 全覆盖测试
 │
 ├── scripts/
 │   └── parameterize_ear.py      ← ★ 命令行入口
@@ -182,11 +187,13 @@ N = (r + 1)(r + 2) / 2 = 9 × 10 / 2 = 45
 
 | 文件 | 行数 | 职责 |
 |------|:---:|------|
-| `ear_param/core.py` | 726 | 全部数学运算：退化检测、重心投影、源面片构建、point-in-triangle 插值、QC 评估 |
-| `ear_param/run.py` | 470 | 将 core.py 各函数编排成完整流水线，提供模拟模式和单样本模式两个入口 |
+| `ear_param/core.py` | 838 | 全部数学运算：退化检测、重心投影、KDTree 加权最小二乘插值、QC 评估、UV 展开 |
+| `ear_param/run.py` | 580 | 将 core.py 各函数编排成完整流水线，提供模拟模式和单样本模式两个入口 |
 | `ear_param/synthetic.py` | 325 | 生成三组模拟耳 mesh + landmarks，用于无真实数据时测试流水线 |
+| `ear_param/visualization.py` | 480 | 可视化：各区域散点图、3D 概览图、QC 热力图、Atlas 全局展开图 |
 | `ear_param/io_utils.py` | 338 | CSV 多编码读取、mesh 加载/保存、双通道日志配置 |
-| `ear_param/config.py` | 65 | 所有可调参数集中管理 |
+| `ear_param/config.py` | 89 | 所有可调参数集中管理（含 KDTree 插值参数共 4 个新项） |
+| `tests/test_core.py` | 980 | 73 个单元测试：退化检测、重心坐标、Atlas UV、KDTree 插值、端到端流程、回归测试 |
 | `scripts/parameterize_ear.py` | 65 | 命令行参数解析 + 路由到 run.py |
 | `config/region_table.csv` | 6 行 | 5 个三角区域的定义（顶点 landmark、分辨率） |
 
@@ -628,40 +635,62 @@ i=8: (0.000, 1.000, 0.000)
 
 v2.0 升级的关键。以前用 LinearNDInterpolator 在参数空间做 Delaunay 三角剖分再插值，但 Delaunay 会重新划分拓扑，可能导致跨解剖结构的错误插值。保留原始 mesh 面片就保证了插值严格在原始曲面拓扑内进行。
 
-### 步骤 5：插值重建采样点三维坐标
+### 步骤 5：KDTree 局部加权最小二乘插值 (v3.0)
 
-**函数**：`_interpolate_sample_points(source_points, source_lambdas, source_faces_3d, source_faces_2d, target_grid, logger)`
+**函数**：`_interpolate_sample_points(source_points, source_lambdas, target_grid, triangle_vertices)`
 
-**这是 v2.0 的核心升级。分两层策略：**
+**v3.0 核心升级：彻底移除 Qhull 依赖，采用 KDTree + 高斯加权最小二乘。**
 
-#### 首选策略：面片感知 Point-in-Triangle 插值
+#### 设计动机
+
+v2.0 使用的 `scipy.interpolate.LinearNDInterpolator` 底层依赖 Qhull (Delaunay 三角剖分)。在高分辨率网格（如 DENSE_SAMPLE_COUNT=5000）下存在两个严重问题：
+
+| 问题 | 影响 |
+|------|------|
+| Qhull Delaunay 构建 O(N log N) | 大样本下成为性能瓶颈 |
+| Qhull 精度错误时直接抛异常 | 无 Python 层 try/except，导致流水线崩溃 |
+
+v3.0 方案用 `scipy.spatial.KDTree` 替代 Qhull，配合逐点共线性检测 + 降级策略，彻底消除崩溃风险。
+
+#### 两层插值策略
+
+**Tier 1：KDTree + 高斯加权最小二乘（主路径）**
 
 对每个目标网格点 `(λ_a, λ_b, λ_c)`：
 
-1. 取其参数坐标 `(λ_b, λ_c)`。
-2. 遍历所有源面片的 2D 投影（包围盒快速剔除后，做精确 point-in-triangle 测试）。
-3. 若找到包含该点的面片，用面片的三个顶点 3D 坐标和该点在面片内的重心坐标做线性插值：
+1. 在 `(λ_b, λ_c)` 参数空间用 KDTree 查询 `k = KNN_K` 个最近邻源点（默认 k=12）。
+2. **共线性检测**：对近邻集的 `(λ_b, λ_c)` 坐标做 SVD（奇异值分解），计算第二/第一奇异值方差比：
+   - 若方差比 < `COLLINEARITY_THRESHOLD`（默认 1e-8），判定近邻近似共线 → 降级到 Tier 2。
+   - 若 SVD 本身失败 → 降级到 Tier 2。
+3. **高斯加权**：以近邻距离的中位数 × 2 为 σ，构建高斯权重矩阵 `w_i = exp(-d_i²/σ²)`。
+4. **加权最小二乘**：对 x, y, z 三个维度分别拟合线性模型 `β₀ + β₁·λ_b + β₂·λ_c`，用目标点的重心坐标预测 3D 坐标。
+5. **结果校验**：检查拟合结果是否有限（`np.isfinite`），若出 NaN/Inf → 降级到 Tier 2。
+
+**Tier 2：三角形顶点重心线性插值（降级）**
+
+当 Tier 1 的任何步骤失败时，直接用目标点的重心坐标和三角形三个顶点的 3D 坐标做线性重建：
 
 ```
-P_3d = α·V0_3d + β·V1_3d + γ·V2_3d
+P_3d = λ_a·A + λ_b·B + λ_c·C
 ```
 
-其中 (α, β, γ) 是目标点在面片 2D 投影内的重心坐标。
+这是最保守但永远不崩溃的兜底方案。
 
-#### 兜底策略：参数空间最近邻
+#### 参数配置
 
-若目标点未落入任何源面片（典型情况：三角形边缘区域、面片覆盖不足）：
+| 参数 | 默认值 | 说明 |
+|------|:---:|------|
+| `KNN_K` | 12 | KDTree 近邻数（2D 空间平衡点） |
+| `COLLINEARITY_THRESHOLD` | 1e-8 | 共线性检测阈值 |
+| `LSQ_RCOND` | 1e-12 | lstsq 截断阈值 |
+| `USE_KD_TREE_INTERPOLATION` | True | 是否启用 KDTree 插值 |
 
-1. 在参数空间 `(λ_b, λ_c)` 中找最近源点。
-2. 直接使用最近源点的 3D 坐标。
+#### 降级比例监控
 
-**为什么用参数空间最近邻而非 3D 最近邻？**
-
-3D 最近邻可能匹配到空间上近但解剖位置不同的点（如耳甲腔的点匹配到耳屏），参数空间最近邻保证匹配的是同一解剖约束范围内的点。
-
-**退化方案（源点过少时）：**
-
-若区域内源点 < 5，直接从三角形顶点做加权插值（平面三角形近似），不计入正常插值统计。
+每个区域处理完成后会 log 降级比例，QC 报告中也会体现。高降级比例通常意味着：
+- 区域内源点稀疏（面片覆盖率低）
+- 三角形 landmark 位置定义与 mesh 实际覆盖范围偏差大
+- 可在 QC 报告 `fallback_ratio` 字段中查看具体数值
 
 ### 步骤 6：QC 质量评估
 
@@ -750,6 +779,10 @@ scripts/parameterize_ear.py
 | `FALLBACK_FAIL_THRESHOLD` | 0.20 | 兜底比例 FAIL 线 | — |
 | `MIN_SOURCE_POINTS` | 5 | 最小源点数（低于此走退化方案） | 视 mesh 精度而定 |
 | `DENSE_SAMPLE_COUNT` | 5000 | 大 mesh 的随机采样上限 | 性能 vs 精度权衡 |
+| `USE_KD_TREE_INTERPOLATION` | True | 启用 KDTree 插值 (v3.0) | 代替 Qhull LinearNDInterpolator |
+| `KNN_K` | 12 | KDTree 近邻数 | 2D 空间最优平衡点 |
+| `COLLINEARITY_THRESHOLD` | 1e-8 | PCA 方差比共线性阈值 | 低于此值降级到顶点插值 |
+| `LSQ_RCOND` | 1e-12 | lstsq 截断阈值 | 奇异值过滤 |
 | `SIMULATED_SAMPLES` | ["S001","S002","S003"] | 模拟样本数 | 增减以测试不同场景 |
 | `SIMULATED_NOISE_LEVELS` | [0.25,0.35,0.28] | 各样本噪声幅度（mm） | 模拟个体差异程度 |
 
@@ -862,9 +895,21 @@ T006,新区域名,L10,L20,L15,8,1
 
 ## 下一步工作
 
-1. ~~**二维展开 (UV Unwrapping)**~~ ✅ 已完成：采样点的 u, v 坐标已基于重心坐标 (λ_b, λ_c) 通过仿射变换实际计算。
-2. **PCA 特征值分析**：堆叠所有样本的采样点为数据矩阵，执行 PCA 降维。
-3. **区域补丁文件支持**：允许用独立的 patch mesh 替代三角形裁剪（处理 landmark 定义无法完全覆盖目标区域的情况）。
-4. **空间索引加速**：当面片数较大时，对源面片的 2D 投影使用 R-tree 或网格索引加速 point-in-triangle 查询。
-5. **并行化**：不同样本的参数化完全独立，可用 multiprocessing 并行处理。
-6. **可视化工具**：输出 ply 文件 + 颜色编码区域，便于在 MeshLab 中检查。
+1. ~~**二维展开 (UV Unwrapping)**~~ ✅ 已完成（2026-07-06）
+2. ~~**Qhull 性能瓶颈消除**~~ ✅ 已完成（2026-07-07）：`_interpolate_sample_points` 彻底替换为 KDTree + 高斯加权最小二乘，移除所有 Qhull 依赖
+3. ~~**可视化模块**~~ ✅ 已完成（2026-07-07）：`visualization.py` 支持各区域散点图、3D 概览、QC 热力图、Atlas 全局展开图
+4. ~~**单元测试套件**~~ ✅ 已完成（2026-07-07）：73 个测试覆盖退化检测、重心坐标、插值降级、端到端流程、回归测试
+5. **PCA 特征值分析**：堆叠所有样本的采样点为数据矩阵，执行 PCA 降维。
+6. **区域补丁文件支持**：允许用独立的 patch mesh 替代三角形裁剪（处理 landmark 定义无法完全覆盖目标区域的情况）。
+7. **并行化**：不同样本的参数化完全独立，可用 multiprocessing 并行处理。
+8. **文档目录**：添加 `docs/` 目录，包括环境搭建指南、真实数据目录约定、区域表扩展方法。
+
+---
+
+## 版本历史
+
+| 日期 | 版本 | 主要变更 |
+|------|:---:|------|
+| 2026-07-03 | v1.0 | 初始流水线：Qhull (LinearNDInterpolator) + 3D 最近邻兜底 |
+| 2026-07-06 | v2.0 | Point-in-Triangle 面片感知插值 + 参数空间最近邻兜底；UV 展开；项目结构扁平化 |
+| 2026-07-07 | v3.0 | **KDTree + 高斯加权最小二乘插值**，彻底移除 Qhull 依赖；新增可视化模块 (480 行)；新增 73 个单元测试（全部通过）；QC 报告修复与增强 |

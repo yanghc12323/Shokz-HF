@@ -561,34 +561,44 @@ class TestInterpolateSamplePoints:
         # 源点包含所有目标点, LinearNDInterpolator 应无 NaN
         assert not np.any(fallback)
 
-    def test_insufficient_points_qhull_error(
+    def test_insufficient_points_graceful_fallback(
         self, unit_triangle, barycentric_grid_res4, null_logger
     ):
         """
-        仅 2 个源点: LinearNDInterpolator 需要至少 4 个点 (2D),
-        不足时会抛出 QhullError.
+        仅 2 个源点: KDTree 方案应优雅降级 (全部使用三角形顶点插值兜底).
+        不再抛出 QhullError.
         """
         a, b, c = unit_triangle
-        source_points = np.array([a, b])  # 仅 2 个点
+        source_points = np.array([a, b])  # 仅 2 个点 → k=2 < 3
         source_lambdas = _barycentric_batch(source_points, a, b, c)
 
-        from scipy.spatial import QhullError
-        with pytest.raises(QhullError):
-            _interpolate_sample_points(
-                source_points,
-                source_lambdas,
-                barycentric_grid_res4,
-                (a, b, c),
-                null_logger,
-            )
+        reconstructed, fallback = _interpolate_sample_points(
+            source_points,
+            source_lambdas,
+            barycentric_grid_res4,
+            (a, b, c),
+            null_logger,
+        )
+        # 全部应降级到三角形顶点插值
+        assert fallback.all()
+        assert np.all(np.isfinite(reconstructed))
+        # 重建点应在三角形平面内
+        for i in range(len(reconstructed)):
+            lambdas = _barycentric_batch(reconstructed[i:i+1], a, b, c)[0]
+            assert np.all(lambdas >= -1e-10)
+            assert np.all(lambdas <= 1.0 + 1e-10)
 
-    def test_few_source_points_causes_fallback(
+    def test_few_source_points_no_crash(
         self, unit_triangle, barycentric_grid_res4, null_logger
     ):
-        """仅 4 个源点形成小三角形: 外部目标点需要兜底."""
+        """
+        仅 4 个源点形成小三角形: KDTree 方案应成功插值所有目标点.
+        
+        与 Qhull 不同, KDTree + 局部加权 LSQ 不依赖 Delaunay 凸包,
+        因此即使源点集中在三角形内部, 也能通过局部线性外推覆盖整个三角形.
+        """
         a, b, c = unit_triangle
         # 4 个源点形成一个较小的子三角形 (在 unit triangle 内部, 不覆盖角落)
-        # 这样 res=4 的目标网格中靠近边缘和顶点的部分将位于凸包外
         mid_ab = (a + b) / 2.0
         mid_bc = (b + c) / 2.0
         mid_ca = (c + a) / 2.0
@@ -603,39 +613,43 @@ class TestInterpolateSamplePoints:
             (a, b, c),
             null_logger,
         )
-        # 源点子三角形不覆盖顶点区域, 部分目标点需要兜底
-        assert np.any(fallback)
         # 所有重建点坐标应有限
         assert np.all(np.isfinite(reconstructed))
+        # KDTree 方案应不依赖凸包: 允许零或极少兜底
+        fallback_ratio = float(fallback.mean())
+        assert fallback_ratio < 0.2, \
+            f"KDTree 方案下兜底比例不应过高: {fallback_ratio:.2%}"
 
-    def test_single_source_point_qhull_error(
+    def test_single_source_point_graceful_fallback(
         self, unit_triangle, barycentric_grid_res4, null_logger
     ):
         """
-        极端: 仅 1 个源点 → QhullError (Delaunay 需要至少 4 个点).
+        极端: 仅 1 个源点 → KDTree 方案应优雅降级 (全部兜底).
+        不再抛出 QhullError.
         """
         a, b, c = unit_triangle
         source_points = np.array([a])
         source_lambdas = _barycentric_batch(source_points, a, b, c)
 
-        from scipy.spatial import QhullError
-        with pytest.raises(QhullError):
-            _interpolate_sample_points(
-                source_points,
-                source_lambdas,
-                barycentric_grid_res4,
-                (a, b, c),
-                null_logger,
-            )
+        reconstructed, fallback = _interpolate_sample_points(
+            source_points,
+            source_lambdas,
+            barycentric_grid_res4,
+            (a, b, c),
+            null_logger,
+        )
+        assert fallback.all()
+        assert np.all(np.isfinite(reconstructed))
 
-    def test_reconstructed_within_source_convex_hull(
+    def test_reconstructed_within_triangle(
         self, unit_triangle, barycentric_grid_res4, null_logger
     ):
         """
-        当源点完全覆盖三角形时, 重建点应位于源点凸包内.
+        当源点位于三角形内时, 所有重建点应位于三角形内部.
+        注: KDTree 方案不依赖凸包, 通过局部加权拟合保证结果.
         """
         a, b, c = unit_triangle
-        # 用顶点 + 质心作为源点 (4 个点, 刚好够 Delaunay)
+        # 用顶点 + 质心作为源点 (4 个点)
         source_points = np.array([a, b, c, (a + b + c) / 3.0])
         source_lambdas = _barycentric_batch(source_points, a, b, c)
 
@@ -646,7 +660,9 @@ class TestInterpolateSamplePoints:
             (a, b, c),
             null_logger,
         )
-        # 验证所有未兜底的重建点的重心坐标在 [0,1] 内
+        # 所有点必须有限
+        assert np.all(np.isfinite(reconstructed))
+        # 未兜底的重建点在三角形内的重心坐标应在 [0, 1] 内
         if not np.all(fallback):
             non_fallback = reconstructed[~fallback]
             recon_lambdas = _barycentric_batch(non_fallback, a, b, c)

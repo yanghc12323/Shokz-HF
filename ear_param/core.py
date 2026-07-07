@@ -28,13 +28,17 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import KDTree
 from .config import (
     PROJECTION_TOL,
     FALLBACK_WARNING_THRESHOLD,
     FALLBACK_FAIL_THRESHOLD,
     MIN_SOURCE_POINTS,
     DENSE_SAMPLE_COUNT,
+    USE_KD_TREE_INTERPOLATION,
+    KNN_K,
+    COLLINEARITY_THRESHOLD,
+    LSQ_RCOND,
 )
 
 
@@ -380,9 +384,14 @@ def _interpolate_sample_points(
     """
     利用源点坐标和重心坐标, 插值重建目标网格在原始三维空间中的坐标.
 
-    方法:
-      1. 首选: LinearNDInterpolator (在重心坐标参数空间插值)
-      2. 兜底: 三角形顶点重心插值 (针对线性插值失败的落点)
+    方法 (双路由, 由 config.USE_KD_TREE_INTERPOLATION 控制):
+      A. KDTree + 局部加权最小二乘线性拟合 (推荐, 无 Qhull 依赖)
+         - 在 (λ_b, λ_c) 参数空间构建 KDTree
+         - 对每个目标点查询 KNN_K 个最近邻源点
+         - 高斯加权最小二乘拟合局部线性模型
+         - 近邻共线时降级到三角形顶点插值 (Tier 2)
+      B. LinearNDInterpolator (旧方案, 依赖 Qhull Delaunay)
+         - 保留用于 A/B 对比, 可通过开关回退
 
     Parameters
     ----------
@@ -392,6 +401,8 @@ def _interpolate_sample_points(
         源点对应的重心坐标 (λ_a, λ_b, λ_c).
     target_grid : np.ndarray, shape (K, 3)
         目标采样网格的重心坐标.
+    triangle_vertices : tuple[np.ndarray, np.ndarray, np.ndarray]
+        三角形三个顶点 (A, B, C), 供兜底使用.
     logger : logging.Logger
         日志记录器.
 
@@ -400,12 +411,36 @@ def _interpolate_sample_points(
     reconstructed : np.ndarray, shape (K, 3)
         重建后的三维坐标 (x, y, z).
     fallback_mask : np.ndarray, shape (K,), dtype=bool
-        哪些点使用了最近邻兜底.
+        哪些点使用了兜底策略 (三角形顶点插值).
+    """
+    if USE_KD_TREE_INTERPOLATION:
+        return _interpolate_sample_points_kdtree(
+            source_points, source_lambdas, target_grid,
+            triangle_vertices, logger,
+        )
+    else:
+        return _interpolate_sample_points_qhull(
+            source_points, source_lambdas, target_grid,
+            triangle_vertices, logger,
+        )
+
+
+def _interpolate_sample_points_qhull(
+    source_points: np.ndarray,
+    source_lambdas: np.ndarray,
+    target_grid: np.ndarray,
+    triangle_vertices: tuple[np.ndarray, np.ndarray, np.ndarray],
+    logger: logging.Logger,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    旧方案: LinearNDInterpolator (依赖 Qhull Delaunay 三角剖分).
+
+    保留用于 A/B 对比，可通过 config.USE_KD_TREE_INTERPOLATION=False 回退.
     """
     n_target = target_grid.shape[0]
 
-    # Step 1: LinearNDInterpolator 在 (λ_b, λ_c) 参数空间插值
-    # 使用 λ_b, λ_c 作为参数 (λ_a 由约束确定, 冗余)
+    from scipy.interpolate import LinearNDInterpolator
+
     interp = LinearNDInterpolator(
         source_lambdas[:, 1:3],   # (λ_b, λ_c) 参数坐标
         source_points,             # 三维空间坐标值
@@ -416,7 +451,6 @@ def _interpolate_sample_points(
     n_nan = int(fallback_mask.sum())
 
     if n_nan > 0 and n_nan < n_target:
-        # Step 2: 三角形顶点重心插值兜底
         logger.debug(
             f"    LinearNDInterpolator 出现 {n_nan} 个 NaN 采样点, "
             f"使用三角形顶点插值兜底."
@@ -443,6 +477,163 @@ def _interpolate_sample_points(
                 target_grid[idx, 2] * c
             )
             fallback_mask[idx] = True
+
+    return reconstructed, fallback_mask
+
+
+def _interpolate_sample_points_kdtree(
+    source_points: np.ndarray,
+    source_lambdas: np.ndarray,
+    target_grid: np.ndarray,
+    triangle_vertices: tuple[np.ndarray, np.ndarray, np.ndarray],
+    logger: logging.Logger,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    新方案: KDTree + 局部加权最小二乘线性拟合.
+
+    完全移除 Qhull 依赖, 无致命异常风险.
+
+    算法:
+      Tier 1 (每个目标点独立):
+        1. 在参数空间 (λ_b, λ_c) 上查询 k 个最近邻源点
+        2. 对 k 个近邻坐标做 PCA 共线性检测
+        3. 若通过: 高斯加权最小二乘拟合 λ→(x,y,z)
+        4. 若未通过: 降级到 Tier 2
+      Tier 2 (降级):
+        使用三角形顶点 (A,B,C) 的重心坐标线性插值
+
+    参数来源: config.py (KNN_K, COLLINEARITY_THRESHOLD, LSQ_RCOND)
+    """
+    n_source = source_points.shape[0]
+    n_target = target_grid.shape[0]
+    k = min(KNN_K, n_source)
+
+    a, b, c = triangle_vertices
+
+    # 预分配输出
+    reconstructed = np.empty((n_target, 3), dtype=float)
+    fallback_mask = np.zeros(n_target, dtype=bool)
+
+    # Step 1: 在 (λ_b, λ_c) 参数空间构建 KDTree
+    # 仅用 λ_b, λ_c 两个自由度 (λ_a = 1 - λ_b - λ_c 冗余)
+    source_uv = source_lambdas[:, 1:3].astype(np.float64, copy=False)
+    target_uv = target_grid[:, 1:3].astype(np.float64, copy=False)
+
+    kdtree = KDTree(source_uv)
+
+    # Step 2: 批量查询 k 个最近邻
+    distances, indices = kdtree.query(target_uv, k=k)
+
+    # distances: (K, k), indices: (K, k)
+    # 确保 2D 形状 (单目标点时也保持二维)
+    if distances.ndim == 1:
+        distances = distances.reshape(-1, 1)
+        indices = indices.reshape(-1, 1)
+
+    # Step 3: 对每个目标点做局部加权拟合
+    for i in range(n_target):
+        nn_idx = indices[i]       # (k,)
+        nn_dists = distances[i]   # (k,)
+
+        # 源点坐标: (λ_b, λ_c) → 设计矩阵
+        nn_uv = source_uv[nn_idx]  # (k, 2)
+        nn_xyz = source_points[nn_idx]  # (k, 3)
+
+        # 共线性检测: 对 nn_uv 做 PCA
+        if k < 3:
+            # 近邻不足, 直接降级
+            fallback_mask[i] = True
+            reconstructed[i] = (
+                target_grid[i, 0] * a +
+                target_grid[i, 1] * b +
+                target_grid[i, 2] * c
+            )
+            continue
+
+        try:
+            uv_centered = nn_uv - nn_uv.mean(axis=0)
+            # 使用 SVD 做 PCA (比 np.linalg.eigh 在低维下更稳定)
+            U, s, Vt = np.linalg.svd(uv_centered, full_matrices=False)
+            # s 是奇异值 (降序), 方差比 = s_min² / s_max²
+            if len(s) >= 2 and s[0] > 1e-15:
+                variance_ratio = (s[1] / s[0]) ** 2
+            else:
+                variance_ratio = 0.0
+
+            if variance_ratio < COLLINEARITY_THRESHOLD:
+                # 近邻近似共线 → 降级到三角形顶点插值
+                fallback_mask[i] = True
+                reconstructed[i] = (
+                    target_grid[i, 0] * a +
+                    target_grid[i, 1] * b +
+                    target_grid[i, 2] * c
+                )
+                continue
+        except np.linalg.LinAlgError:
+            # SVD 失败 → 降级
+            fallback_mask[i] = True
+            reconstructed[i] = (
+                target_grid[i, 0] * a +
+                target_grid[i, 1] * b +
+                target_grid[i, 2] * c
+            )
+            continue
+
+        # 高斯加权
+        # σ = median(distances) × 2, 使最近一半点获较高权重
+        sigma = np.median(nn_dists) * 2.0
+        if sigma < 1e-12:
+            sigma = 1e-12
+        weights = np.exp(- (nn_dists ** 2) / (sigma ** 2))
+        w_sqrt = np.sqrt(weights)
+
+        # 构建设计矩阵: [1, λ_b, λ_c]
+        # 加权最小二乘: W * A * β = W * y
+        # 等价于 A_w = diag(w_sqrt) @ A, y_w = diag(w_sqrt) @ y
+        A = np.column_stack([
+            np.ones(k, dtype=float),
+            nn_uv[:, 0],  # λ_b
+            nn_uv[:, 1],  # λ_c
+        ])
+
+        A_w = A * w_sqrt[:, None]  # (k, 3)
+
+        # 对 x, y, z 分别求解
+        try:
+            for dim in range(3):
+                y_w = nn_xyz[:, dim] * w_sqrt
+                beta, residuals, rank, s_vals = np.linalg.lstsq(
+                    A_w, y_w, rcond=LSQ_RCOND
+                )
+                # 用目标点的 (1, λ_b_target, λ_c_target) 预测
+                reconstructed[i, dim] = (
+                    beta[0]
+                    + beta[1] * target_grid[i, 1]
+                    + beta[2] * target_grid[i, 2]
+                )
+            # 检查拟合结果是否有限
+            if not np.all(np.isfinite(reconstructed[i])):
+                fallback_mask[i] = True
+                reconstructed[i] = (
+                    target_grid[i, 0] * a +
+                    target_grid[i, 1] * b +
+                    target_grid[i, 2] * c
+                )
+        except np.linalg.LinAlgError:
+            # lstsq 奇异矩阵 → 降级
+            fallback_mask[i] = True
+            reconstructed[i] = (
+                target_grid[i, 0] * a +
+                target_grid[i, 1] * b +
+                target_grid[i, 2] * c
+            )
+
+    n_fallback = int(fallback_mask.sum())
+    if n_fallback > 0:
+        logger.debug(
+            f"    KDTree 插值: {n_fallback}/{n_target} 个点降级到三角形顶点插值 "
+            f"(近邻共线或拟合失败)"
+        )
 
     return reconstructed, fallback_mask
 

@@ -1,6 +1,6 @@
 region_id,region_name,used_patch_file,source_point_count,sample_point_count,expected_point_count,fallback_ratio,interpolator,status,sample_id
-T001,耳甲腔上区,False,402,45,45,0.0,LinearNDInterpolator,PASS,S002
-T002,耳甲腔下区,False,388,45,45,0.0,LinearNDInterpolator,PASS,S002
-T003,耳甲腔前区,False,102,45,45,0.0222,LinearNDInterpolator,PASS,S002
-T004,耳屏区,False,759,45,45,0.0,LinearNDInterpolator,PASS,S002
-T005,对耳屏区,False,1030,45,45,0.0,LinearNDInterpolator,PASS,S002
+T001,耳甲腔上区,False,173,45,45,0.0,LinearNDInterpolator,PASS,S002
+T002,耳甲腔下区,False,289,45,45,0.0,LinearNDInterpolator,PASS,S002
+T003,耳甲腔前区,False,41,45,45,0.0,LinearNDInterpolator,PASS,S002
+T004,耳屏区,False,557,45,45,0.0,LinearNDInterpolator,PASS,S002
+T005,对耳屏区,False,1011,45,45,0.0,LinearNDInterpolator,PASS,S002
