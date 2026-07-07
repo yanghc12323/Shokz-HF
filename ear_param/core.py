@@ -29,8 +29,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.interpolate import LinearNDInterpolator
-from scipy.spatial import cKDTree
-
 from .config import (
     PROJECTION_TOL,
     FALLBACK_WARNING_THRESHOLD,
@@ -158,13 +156,16 @@ def _clip_points_to_triangle(
     b: np.ndarray,
     c: np.ndarray,
     tolerance: float = PROJECTION_TOL,
+    plane_tolerance: float | None = None,
 ) -> np.ndarray:
     """
     计算所有点相对于三角形 (A,B,C) 的重心坐标,
     筛选在三角形投影区域内的点.
 
     使用最小二乘法将 3D 点投影到三角形平面, 计算重心坐标 (λ_a, λ_b, λ_c).
-    约束: λ_a + λ_b + λ_c = 1, 且每个 λ_i ∈ [-tolerance, 1 + tolerance].
+    约束:
+      1. λ_a + λ_b + λ_c = 1, 且每个 λ_i ∈ [-tolerance, 1 + tolerance].
+      2. 点到三角形平面的垂直距离 ≤ plane_tolerance (若提供, 否则自动推定).
 
     Parameters
     ----------
@@ -174,22 +175,52 @@ def _clip_points_to_triangle(
         三角形顶点坐标.
     tolerance : float
         允许重心坐标超出 [0, 1] 的容差.
+    plane_tolerance : float or None
+        点到三角形平面的最大垂直距离.
+        若为 None, 自动设为三角形最长边 × tolerance.
 
     Returns
     -------
     np.ndarray, shape (M, 3)
-        在三角形容忍范围内的点的原始三维坐标.
+         在三角形容忍范围内的点的原始三维坐标.
     """
     if points.ndim == 2 and points.shape[0] == 0:
         return np.empty((0, 3), dtype=float)
+
+    # 计算三角形平面法向量和点到平面的垂直距离
+    ab = b - a
+    ac = c - a
+    normal = np.cross(ab, ac)
+    normal_len = float(np.linalg.norm(normal))
+    if normal_len < 1e-12:
+        return np.empty((0, 3), dtype=float)
+
+    unit_normal = normal / normal_len
+    # 点到平面的垂直距离 (绝对值)
+    plane_dists = np.abs(np.dot(points - a, unit_normal))  # (N,)
+
     # 使用辅助函数求所有点的重心坐标
     lambdas = _barycentric_batch(points, a, b, c)
-    # 筛选
-    mask = (
+    # 筛选: 重心坐标边界
+    bary_mask = (
         (lambdas[:, 0] >= -tolerance) & (lambdas[:, 0] <= 1 + tolerance)
         & (lambdas[:, 1] >= -tolerance) & (lambdas[:, 1] <= 1 + tolerance)
         & (lambdas[:, 2] >= -tolerance) & (lambdas[:, 2] <= 1 + tolerance)
     )
+
+    # 筛选: 平面距离 (避免远平面点被错误纳入)
+    if plane_tolerance is None:
+        # 默认: 三角形最长边 × tolerance
+        edge_lens = [
+            float(np.linalg.norm(ab)),
+            float(np.linalg.norm(ac)),
+            float(np.linalg.norm(c - b)),
+        ]
+        plane_tolerance = max(edge_lens) * tolerance
+
+    plane_mask = plane_dists <= plane_tolerance
+
+    mask = bary_mask & plane_mask
     return points[mask]
 
 
@@ -343,6 +374,7 @@ def _interpolate_sample_points(
     source_points: np.ndarray,
     source_lambdas: np.ndarray,
     target_grid: np.ndarray,
+    triangle_vertices: tuple[np.ndarray, np.ndarray, np.ndarray],
     logger: logging.Logger,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
@@ -350,7 +382,7 @@ def _interpolate_sample_points(
 
     方法:
       1. 首选: LinearNDInterpolator (在重心坐标参数空间插值)
-      2. 兜底: cKDTree 最近邻搜索 (针对线性插值失败的落点)
+      2. 兜底: 三角形顶点重心插值 (针对线性插值失败的落点)
 
     Parameters
     ----------
@@ -384,31 +416,32 @@ def _interpolate_sample_points(
     n_nan = int(fallback_mask.sum())
 
     if n_nan > 0 and n_nan < n_target:
-        # Step 2: cKDTree 兜底
+        # Step 2: 三角形顶点重心插值兜底
         logger.debug(
             f"    LinearNDInterpolator 出现 {n_nan} 个 NaN 采样点, "
-            f"使用 cKDTree 最近邻兜底."
+            f"使用三角形顶点插值兜底."
         )
-        tree = cKDTree(source_points)
+        a, b, c = triangle_vertices
         nan_indices = np.where(fallback_mask)[0]
         for idx in nan_indices:
-            # 用目标网格点的重心坐标在参数空间中找最近的源点
-            target_lambda = target_grid[idx, 1:]  # (λ_b, λ_c)
-            dists = np.linalg.norm(source_lambdas[:, 1:] - target_lambda, axis=1)
-            nearest = int(np.argmin(dists))
-            reconstructed[idx] = source_points[nearest]
+            reconstructed[idx] = (
+                target_grid[idx, 0] * a +
+                target_grid[idx, 1] * b +
+                target_grid[idx, 2] * c
+            )
             fallback_mask[idx] = True
     elif n_nan == n_target:
         logger.debug(
             f"    LinearNDInterpolator 全部 {n_nan} 个点失败, "
-            f"全部使用最近邻兜底."
+            f"全部使用三角形顶点插值兜底."
         )
-        tree = cKDTree(source_points)
+        a, b, c = triangle_vertices
         for idx in range(n_target):
-            target_lambda = target_grid[idx, 1:]
-            dists = np.linalg.norm(source_lambdas[:, 1:] - target_lambda, axis=1)
-            nearest = int(np.argmin(dists))
-            reconstructed[idx] = source_points[nearest]
+            reconstructed[idx] = (
+                target_grid[idx, 0] * a +
+                target_grid[idx, 1] * b +
+                target_grid[idx, 2] * c
+            )
             fallback_mask[idx] = True
 
     return reconstructed, fallback_mask
@@ -521,7 +554,7 @@ def process_region(
         fallback_mask = np.ones(n_target, dtype=bool)
     else:
         reconstructed, fallback_mask = _interpolate_sample_points(
-            clipped, source_lambdas, target_grid, logger
+            clipped, source_lambdas, target_grid, (a, b, c), logger
         )
 
     n_fallback = int(fallback_mask.sum())

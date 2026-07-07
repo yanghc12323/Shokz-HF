@@ -552,6 +552,7 @@ class TestInterpolateSamplePoints:
             source_points,
             source_lambdas,
             grid,
+            (a, b, c),
             null_logger,
         )
 
@@ -577,6 +578,7 @@ class TestInterpolateSamplePoints:
                 source_points,
                 source_lambdas,
                 barycentric_grid_res4,
+                (a, b, c),
                 null_logger,
             )
 
@@ -598,6 +600,7 @@ class TestInterpolateSamplePoints:
             source_points,
             source_lambdas,
             barycentric_grid_res4,
+            (a, b, c),
             null_logger,
         )
         # 源点子三角形不覆盖顶点区域, 部分目标点需要兜底
@@ -621,6 +624,7 @@ class TestInterpolateSamplePoints:
                 source_points,
                 source_lambdas,
                 barycentric_grid_res4,
+                (a, b, c),
                 null_logger,
             )
 
@@ -639,6 +643,7 @@ class TestInterpolateSamplePoints:
             source_points,
             source_lambdas,
             barycentric_grid_res4,
+            (a, b, c),
             null_logger,
         )
         # 验证所有未兜底的重建点的重心坐标在 [0,1] 内
@@ -655,7 +660,7 @@ class TestInterpolateSamplePoints:
         lambdas = _barycentric_batch(pts, a, b, c)
 
         reconstructed, fallback = _interpolate_sample_points(
-            pts, lambdas, barycentric_grid_res8, null_logger
+            pts, lambdas, barycentric_grid_res8, (a, b, c), null_logger
         )
         assert reconstructed.shape == (45, 3)
         assert fallback.shape == (45,)
@@ -683,7 +688,7 @@ class TestInterpolateSamplePoints:
             src_lambdas = _barycentric_batch(src_pts, a, b, c)
 
             _, fallback = _interpolate_sample_points(
-                src_pts, src_lambdas, barycentric_grid_res4, null_logger
+                src_pts, src_lambdas, barycentric_grid_res4, (a, b, c), null_logger
             )
             ratios.append(float(fallback.mean()))
         # 兜底比例应随源点数增加而递减
