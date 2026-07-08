@@ -1,6 +1,2 @@
 region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
-T001,耳甲腔上区,L10,L29,L28,8,1
-T002,耳甲腔下区,L10,L31,L30,8,1
-T003,耳甲腔前区,L10,L28,L30,8,1
-T004,耳屏区,L19,L21,L28,8,0
-T005,对耳屏区,L20,L21,L15,8,0
+T001,test,L9,L16,L18,8,1
