@@ -1,19 +1,19 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-io_utils.py — 文件 I/O 与日志工具
+io_utils.py 鈥?鏂囦欢 I/O 涓庢棩蹇楀伐鍏?
 ==================================
 
-提供统一的文件加载、保存和日志配置接口。
+鎻愪緵缁熶竴鐨勬枃浠跺姞杞姐€佷繚瀛樺拰鏃ュ織閰嶇疆鎺ュ彛銆?
 
-包含:
-  - read_csv_robust: 多编码兼容的 CSV 读取
-  - load_mesh:       通用 mesh 加载 (ply/obj/stl)
-  - load_landmarks:  特征点 CSV 加载与校验
-  - get_landmark:    从 DataFrame 提取单个特征点坐标
-  - save_mesh_ply:   保存 mesh 为 PLY
-  - save_landmarks_csv: 保存特征点 CSV
-  - setup_logging:   配置双输出日志 (控制台 + 文件)
+鍖呭惈:
+  - read_csv_robust: 澶氱紪鐮佸吋瀹圭殑 CSV 璇诲彇
+  - load_mesh:       閫氱敤 mesh 鍔犺浇 (ply/obj/stl)
+  - load_landmarks:  鐗瑰緛鐐?CSV 鍔犺浇涓庢牎楠?
+  - get_landmark:    浠?DataFrame 鎻愬彇鍗曚釜鐗瑰緛鐐瑰潗鏍?
+  - save_mesh_ply:   淇濆瓨 mesh 涓?PLY
+  - save_landmarks_csv: 淇濆瓨鐗瑰緛鐐?CSV
+  - setup_logging:   閰嶇疆鍙岃緭鍑烘棩蹇?(鎺у埗鍙?+ 鏂囦欢)
 """
 
 import logging
@@ -27,7 +27,7 @@ import trimesh
 
 
 # ============================================================================
-# 日志配置
+# 鏃ュ織閰嶇疆
 # ============================================================================
 
 def setup_logging(
@@ -36,24 +36,24 @@ def setup_logging(
     log_dir: Path,
 ) -> logging.Logger:
     """
-    配置日志: 同时输出到控制台和文件.
+    閰嶇疆鏃ュ織: 鍚屾椂杈撳嚭鍒版帶鍒跺彴鍜屾枃浠?
 
-    - 文件 handler 使用 DEBUG 级别, 记录详细调试信息
-    - 控制台 handler 使用 INFO 级别, 避免刷屏
+    - 鏂囦欢 handler 浣跨敤 DEBUG 绾у埆, 璁板綍璇︾粏璋冭瘯淇℃伅
+    - 鎺у埗鍙?handler 浣跨敤 INFO 绾у埆, 閬垮厤鍒峰睆
 
     Parameters
     ----------
     sample_id : str
-        样本编号, 如 'S001', 或 'SIMULATION' 用于批量模式.
+        鏍锋湰缂栧彿, 濡?'S001', 鎴?'SIMULATION' 鐢ㄤ簬鎵归噺妯″紡.
     side : str
-        左右侧, 'R' 或 'L', 或 'ALL' 用于批量模式.
+        宸﹀彸渚? 'R' 鎴?'L', 鎴?'ALL' 鐢ㄤ簬鎵归噺妯″紡.
     log_dir : Path
-        日志输出目录.
+        鏃ュ織杈撳嚭鐩綍.
 
     Returns
     -------
     logging.Logger
-        配置好的 logger 实例, 格式为:
+        閰嶇疆濂界殑 logger 瀹炰緥, 鏍煎紡涓?
         "YYYY-MM-DD HH:MM:SS | LEVEL    | message"
     """
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -62,20 +62,20 @@ def setup_logging(
 
     logger = logging.getLogger(f"parameterize_{sample_id}_{side}")
     logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()  # 防止重复添加 handler
+    logger.handlers.clear()  # 闃叉閲嶅娣诲姞 handler
 
     fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-7s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # 文件 handler (DEBUG 级别)
+    # 鏂囦欢 handler (DEBUG 绾у埆)
     fh = logging.FileHandler(str(log_file), encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     logger.addHandler(fh)
 
-    # 控制台 handler (INFO 级别)
+    # 鎺у埗鍙?handler (INFO 绾у埆)
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
     ch.setFormatter(fmt)
@@ -85,7 +85,7 @@ def setup_logging(
 
 
 # ============================================================================
-# CSV 读取
+# CSV 璇诲彇
 # ============================================================================
 
 def read_csv_robust(
@@ -93,42 +93,42 @@ def read_csv_robust(
     logger: logging.Logger | None = None,
 ) -> pd.DataFrame:
     """
-    以 UTF-8 优先、多编码兜底的方式读取 CSV 文件.
+    浠?UTF-8 浼樺厛銆佸缂栫爜鍏滃簳鐨勬柟寮忚鍙?CSV 鏂囦欢.
 
-    自动尝试以下编码顺序:
-      utf-8 → utf-8-sig → gbk → gb2312 → latin-1
+    鑷姩灏濊瘯浠ヤ笅缂栫爜椤哄簭:
+      utf-8 鈫?utf-8-sig 鈫?gbk 鈫?gb2312 鈫?latin-1
 
     Parameters
     ----------
     filepath : Path
-        CSV 文件路径.
+        CSV 鏂囦欢璺緞.
     logger : logging.Logger | None
-        日志记录器, 可选.
+        鏃ュ織璁板綍鍣? 鍙€?
 
     Returns
     -------
     pd.DataFrame
-        读取的数据表.
+        璇诲彇鐨勬暟鎹〃.
 
     Raises
     ------
     ValueError
-        所有编码尝试均失败时抛出.
+        鎵€鏈夌紪鐮佸皾璇曞潎澶辫触鏃舵姏鍑?
     """
     encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1']
     for enc in encodings:
         try:
             df = pd.read_csv(str(filepath), encoding=enc)
             if logger:
-                logger.debug(f"读取 CSV: {filepath} (encoding={enc})")
+                logger.debug(f"璇诲彇 CSV: {filepath} (encoding={enc})")
             return df
         except (UnicodeDecodeError, UnicodeError):
             continue
-    raise ValueError(f"无法解码 CSV 文件: {filepath}")
+    raise ValueError(f"鏃犳硶瑙ｇ爜 CSV 鏂囦欢: {filepath}")
 
 
 # ============================================================================
-# Mesh 加载与保存
+# Mesh 鍔犺浇涓庝繚瀛?
 # ============================================================================
 
 def load_mesh(
@@ -136,52 +136,52 @@ def load_mesh(
     logger: logging.Logger | None = None,
 ) -> trimesh.Trimesh:
     """
-    加载 mesh 文件 (.ply, .obj, .stl).
+    鍔犺浇 mesh 鏂囦欢 (.ply, .obj, .stl).
 
-    自动处理 Scene 类型 (提取所有几何体合并).
+    鑷姩澶勭悊 Scene 绫诲瀷 (鎻愬彇鎵€鏈夊嚑浣曚綋鍚堝苟).
 
     Parameters
     ----------
     mesh_path : str | Path
-        Mesh 文件路径.
+        Mesh 鏂囦欢璺緞.
     logger : logging.Logger | None
-        日志记录器, 可选.
+        鏃ュ織璁板綍鍣? 鍙€?
 
     Returns
     -------
     trimesh.Trimesh
-        加载的独立 mesh 对象.
+        鍔犺浇鐨勭嫭绔?mesh 瀵硅薄.
 
     Raises
     ------
     FileNotFoundError
-        文件不存在.
+        鏂囦欢涓嶅瓨鍦?
     ValueError
-        无法加载为 Trimesh 或 mesh 为空.
+        鏃犳硶鍔犺浇涓?Trimesh 鎴?mesh 涓虹┖.
     """
     mesh_path = Path(mesh_path)
     if not mesh_path.exists():
-        raise FileNotFoundError(f"Mesh 文件不存在: {mesh_path}")
+        raise FileNotFoundError(f"Mesh 鏂囦欢涓嶅瓨鍦? {mesh_path}")
 
     if logger:
-        logger.debug(f"加载 mesh: {mesh_path}")
+        logger.debug(f"鍔犺浇 mesh: {mesh_path}")
 
     mesh = trimesh.load(str(mesh_path), process=False)
 
-    # 处理 Scene 类型
+    # 澶勭悊 Scene 绫诲瀷
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(tuple(mesh.geometry.values()))
 
     if not isinstance(mesh, trimesh.Trimesh):
-        raise ValueError(f"无法将文件加载为 Trimesh: {mesh_path}")
+        raise ValueError(f"鏃犳硶灏嗘枃浠跺姞杞戒负 Trimesh: {mesh_path}")
 
     n_verts = mesh.vertices.shape[0]
     n_faces = len(mesh.faces) if mesh.faces is not None else 0
     if n_verts == 0:
-        raise ValueError(f"空 mesh: {mesh_path}")
+        raise ValueError(f"绌?mesh: {mesh_path}")
 
     if logger:
-        logger.debug(f"  -> 顶点数={n_verts}, 面数={n_faces}")
+        logger.debug(f"  -> 椤剁偣鏁?{n_verts}, 闈㈡暟={n_faces}")
 
     return mesh
 
@@ -192,23 +192,23 @@ def save_mesh_ply(
     filepath: Path,
 ) -> None:
     """
-    保存 mesh 为 PLY 文件.
+    淇濆瓨 mesh 涓?PLY 鏂囦欢.
 
     Parameters
     ----------
     vertices : np.ndarray, shape (N, 3)
-        网格顶点坐标.
+        缃戞牸椤剁偣鍧愭爣.
     faces : np.ndarray, shape (M, 3)
-        三角面片索引.
+        涓夎闈㈢墖绱㈠紩.
     filepath : Path
-        输出文件路径.
+        杈撳嚭鏂囦欢璺緞.
     """
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
     mesh.export(str(filepath))
 
 
 # ============================================================================
-# Landmarks 加载与保存
+# Landmarks 鍔犺浇涓庝繚瀛?
 # ============================================================================
 
 def load_landmarks(
@@ -216,49 +216,64 @@ def load_landmarks(
     logger: logging.Logger | None = None,
 ) -> pd.DataFrame:
     """
-    加载特征点 CSV 文件.
+    鍔犺浇鐗瑰緛鐐?CSV 鏂囦欢.
 
-    要求至少包含以下列: landmark_id, x, y, z.
-    以 landmark_id 作为 DataFrame 索引.
+    瑕佹眰鑷冲皯鍖呭惈浠ヤ笅鍒? landmark_id, x, y, z.
+    浠?landmark_id 浣滀负 DataFrame 绱㈠紩.
 
     Parameters
     ----------
     csv_path : str | Path
-        CSV 文件路径.
+        CSV 鏂囦欢璺緞.
     logger : logging.Logger | None
-        日志记录器, 可选.
+        鏃ュ織璁板綍鍣? 鍙€?
 
     Returns
     -------
     pd.DataFrame
-        以 landmark_id 为索引的特征点 DataFrame.
+        浠?landmark_id 涓虹储寮曠殑鐗瑰緛鐐?DataFrame.
 
     Raises
     ------
     FileNotFoundError
-        文件不存在.
+        鏂囦欢涓嶅瓨鍦?
     ValueError
-        缺少必要列.
+        缂哄皯蹇呰鍒?
     """
     csv_path = Path(csv_path)
     if not csv_path.exists():
-        raise FileNotFoundError(f"特征点文件不存在: {csv_path}")
+        raise FileNotFoundError(f"鐗瑰緛鐐规枃浠朵笉瀛樺湪: {csv_path}")
 
     if logger:
-        logger.debug(f"加载特征点: {csv_path}")
+        logger.debug(f"鍔犺浇鐗瑰緛鐐? {csv_path}")
 
     df = read_csv_robust(csv_path, logger)
 
     required = {"landmark_id", "x", "y", "z"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"特征点文件缺少列: {missing}, 实际列: {list(df.columns)}")
+        if len(df.columns) == 4:
+            for enc in ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'latin-1']:
+                try:
+                    df = pd.read_csv(
+                        str(csv_path),
+                        encoding=enc,
+                        header=None,
+                        names=["landmark_id", "x", "y", "z"],
+                    )
+                    break
+                except (UnicodeDecodeError, UnicodeError):
+                    continue
+            else:
+                raise ValueError(f"Cannot decode CSV file: {csv_path}")
+        else:
+            raise ValueError(f"Landmark file is missing columns: {missing}, actual columns: {list(df.columns)}")
 
     df["landmark_id"] = df["landmark_id"].astype(str)
     df = df.set_index("landmark_id")
 
     if logger:
-        logger.debug(f"  -> 加载了 {len(df)} 个特征点")
+        logger.debug(f"  -> 鍔犺浇浜?{len(df)} 涓壒寰佺偣")
 
     return df
 
@@ -269,29 +284,29 @@ def get_landmark(
     logger: logging.Logger | None = None,
 ) -> np.ndarray:
     """
-    从特征点 DataFrame 中提取指定 landmark 的 (x, y, z) 坐标.
+    浠庣壒寰佺偣 DataFrame 涓彁鍙栨寚瀹?landmark 鐨?(x, y, z) 鍧愭爣.
 
     Parameters
     ----------
     lms : pd.DataFrame
-        以 landmark_id 为索引的特征点表.
+        浠?landmark_id 涓虹储寮曠殑鐗瑰緛鐐硅〃.
     lm_id : str
-        特征点编号, 如 'L10'.
+        鐗瑰緛鐐圭紪鍙? 濡?'L10'.
     logger : logging.Logger | None
-        日志记录器, 可选.
+        鏃ュ織璁板綍鍣? 鍙€?
 
     Returns
     -------
     np.ndarray, shape (3,)
-        特征点的三维坐标数组 [x, y, z].
+        鐗瑰緛鐐圭殑涓夌淮鍧愭爣鏁扮粍 [x, y, z].
 
     Raises
     ------
     KeyError
-        指定的 landmark 不存在.
+        鎸囧畾鐨?landmark 涓嶅瓨鍦?
     """
     if lm_id not in lms.index:
-        msg = f"缺少特征点: {lm_id}"
+        msg = f"缂哄皯鐗瑰緛鐐? {lm_id}"
         if logger:
             logger.error(msg)
         raise KeyError(msg)
@@ -306,20 +321,20 @@ def save_landmarks_csv(
     annotator: str = "simulated",
 ) -> None:
     """
-    保存特征点为 CSV 文件.
+    淇濆瓨鐗瑰緛鐐逛负 CSV 鏂囦欢.
 
     Parameters
     ----------
     landmark_coords : dict
-        {landmark_id: (x, y, z)} 坐标字典.
+        {landmark_id: (x, y, z)} 鍧愭爣瀛楀吀.
     filepath : Path
-        输出文件路径.
+        杈撳嚭鏂囦欢璺緞.
     sample_id : str
-        样本编号 (仅用于注释, 不影响输出内容).
+        鏍锋湰缂栧彿 (浠呯敤浜庢敞閲? 涓嶅奖鍝嶈緭鍑哄唴瀹?.
     landmark_ids : list[str] | None
-        要输出的 landmark 编号列表. 为 None 时输出全部.
+        瑕佽緭鍑虹殑 landmark 缂栧彿鍒楄〃. 涓?None 鏃惰緭鍑哄叏閮?
     annotator : str
-        标注者标识.
+        鏍囨敞鑰呮爣璇?
     """
     ids = landmark_ids if landmark_ids is not None else list(landmark_coords.keys())
     records = []

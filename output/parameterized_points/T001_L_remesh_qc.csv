@@ -1,2 +1,0 @@
-sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,unmapped_count,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
-T001,L,T001,test,45,45,64,0,7437,0,7437,True,output\remesh\T001_L\T001_remesh.ply,PASS

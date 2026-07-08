@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import math
 import logging
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -52,6 +53,7 @@ from ear_param.config import (
     MIN_SOURCE_POINTS,
     DENSE_SAMPLE_COUNT,
 )
+from ear_param.io_utils import load_landmarks
 
 
 # ============================================================================
@@ -994,3 +996,29 @@ class TestRegression:
         assert v_local[0] == 0.4
         np.testing.assert_allclose(u_atlas[0], 1.3)
         np.testing.assert_allclose(v_atlas[0], 0.4)
+
+
+class TestLoadLandmarks:
+    def test_load_landmarks_accepts_headerless_four_column_csv(self):
+        test_dir = Path(".test_artifacts")
+        test_dir.mkdir(exist_ok=True)
+        csv_path = test_dir / "headerless_landmarks.csv"
+        csv_path.write_text(
+            "L7, 19.002450, 8.250522, 0.448574\n"
+            "L10, -2.900781, -3.275620, -5.172998\n",
+            encoding="utf-8",
+        )
+
+        landmarks = load_landmarks(csv_path)
+
+        assert list(landmarks.index) == ["L7", "L10"]
+        assert list(landmarks.columns) == ["x", "y", "z"]
+        np.testing.assert_allclose(
+            landmarks.loc["L10", ["x", "y", "z"]].to_numpy(dtype=float),
+            [-2.900781, -3.275620, -5.172998],
+        )
+        try:
+            csv_path.unlink()
+            test_dir.rmdir()
+        except OSError:
+            pass
