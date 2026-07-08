@@ -1,0 +1,14 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,unmapped_count,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T078,L,T001,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T002,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T003,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T004,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T005,test,45,45,64,2,0,1,1215,False,,WARNING
+T078,L,T006,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T007,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T008,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T009,test,45,45,64,16,161,0,161,False,,FAIL
+T078,L,T010,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T011,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T012,test,45,45,64,45,0,1,1,False,,FAIL
+T078,L,T013,test,45,45,64,45,0,1,1,False,,FAIL

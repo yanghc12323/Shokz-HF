@@ -3,7 +3,7 @@
 > 面向对象：后续接手本项目的 AI 或工程师  
 > 更新时间：2026-07-08  
 > 上游输入：W2 patch-based remesh 合格输出  
-> 当前状态：W3 尚未正式实现；T076/T077 暂无共同 PASS region，因此当前重点仍是 W2 region table 优化
+> 当前状态：W3 尚未正式实现；四样本暂无共同 PASS region，因此当前重点仍是 W2 region table 优化
 
 ## 1. 一句话背景
 
@@ -16,24 +16,28 @@ W3 的任务是：对所有合格模型进行 PCA，选取累计解释方差达�
 当前有效真实样本：
 
 ```text
+T013_L
 T076_L
 T077_L
+T078_L
 ```
 
-当前 12 区域 QC 结果：
+当前 13 区域 QC 可视化结果：
 
 ```text
-T076_L: PASS=2, WARNING=8, FAIL=2
-T077_L: PASS=1, WARNING=10, FAIL=1
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=0, WARNING=0,  FAIL=13
 共同 PASS region: 0
 ```
 
-因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。当前 T076/T077 没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
+因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。当前四样本没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
 
 当前正确顺序是：
 
 ```text
-T0：用更多真实样本验证 region table。
+T0：继续用真实样本验证 region table。
 T1：调整 region table，找到多个样本共同 PASS 的候选 region。
 T2：必要时再调整边界路径、patch 选择或参数。
 W3：只对共同 PASS 的 region 做 PCA。
@@ -290,4 +294,4 @@ W3 不应重新 remesh 或重新 triangulate。faces 必须来自 W2 的 `*_reme
 
 ## 16. 当前结论
 
-W3 技术路线已经明确，但当前真实数据还不满足正式 PCA 的前置条件。下一步应先完成 W2 的 T0/T1/T2：用更多样本验证、调整 region table、再考虑算法参数。等多个样本在同一 region 上同时 PASS 后，再实现并运行 W3。
+W3 技术路线已经明确，但当前四样本还不满足正式 PCA 的前置条件。下一步应先完成 W2 的 T0/T1/T2：继续验证、调整 region table、再考虑算法参数。等多个样本在同一 region 上同时 PASS 后，再实现并运行 W3。

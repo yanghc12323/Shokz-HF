@@ -1,7 +1,7 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
 > 当前主线：论文式 patch-based remesh  
-> 当前阶段：W2 remesh 主流程已可运行，正在做真实样本 QC 与 region table 优化  
+> 当前阶段：W2 remesh 主流程已可运行，正在做四样本 QC 与 region table 优化  
 > 更新时间：2026-07-08
 
 ## 1. 项目目标
@@ -26,15 +26,19 @@
 当前有效真实样本：
 
 ```text
+data/clean_mesh/T013_L.ply
+data/landmarks/T013_L_landmarks.csv
 data/clean_mesh/T076_L.ply
 data/landmarks/T076_L_landmarks.csv
 data/clean_mesh/T077_L.ply
 data/landmarks/T077_L_landmarks.csv
+data/clean_mesh/T078_L.ply
+data/landmarks/T078_L_landmarks.csv
 ```
 
-旧的 `T001_L` 输入和输出已经从当前主线移除。不要再把旧 T001 结果作为当前 12 区域方案的有效结果使用。
+当前 `config/region_table.csv` 包含 13 个三角 region，每个 region 当前 `resolution=8`，即每区 45 个 template 点、64 个 template faces。
 
-当前 `config/region_table.csv` 已扩展为 12 个三角 region，每个 region 当前 `resolution=8`，即每区 45 个 template 点、64 个 template faces。
+旧的 `T001_L` 输入和输出已经从当前主线移除。不要再把旧 T001 结果作为当前 13 区域方案的有效结果使用。
 
 ## 3. 当前 W2 进展
 
@@ -56,9 +60,11 @@ W2 任务是：
 10. 输出 points/faces/features/QC/PLY。
 11. 输出每个 region 的 QC 可视化图。
 
-结论：代码层面 W2 主流程已经可运行；当前主要工作不是继续堆功能，而是用更多真实样本验证 region table 的稳定性，并修正不稳定 region。
+结论：代码层面 W2 主流程已经可运行；当前主要工作不是继续堆功能，而是用真实样本验证 region table 的稳定性，并修正不稳定 region。
 
 ## 4. 安装依赖
+
+在 VSCode 中打开项目根目录 `D:\YHC\人头项目` 后，打开 Terminal，运行：
 
 ```powershell
 pip install -r requirements.txt
@@ -76,11 +82,22 @@ matplotlib
 
 ## 5. 运行 W2 Remesh
 
-在项目根目录分别运行：
+### 单样本运行
 
 ```powershell
+python scripts/parameterize_ear_remesh.py --sample_id T013 --side L --mesh data/clean_mesh/T013_L.ply --landmarks data/landmarks/T013_L_landmarks.csv
 python scripts/parameterize_ear_remesh.py --sample_id T076 --side L --mesh data/clean_mesh/T076_L.ply --landmarks data/landmarks/T076_L_landmarks.csv
 python scripts/parameterize_ear_remesh.py --sample_id T077 --side L --mesh data/clean_mesh/T077_L.ply --landmarks data/landmarks/T077_L_landmarks.csv
+python scripts/parameterize_ear_remesh.py --sample_id T078 --side L --mesh data/clean_mesh/T078_L.ply --landmarks data/landmarks/T078_L_landmarks.csv
+```
+
+### PowerShell 批量运行
+
+```powershell
+$samples = "T013","T076","T077","T078"
+foreach ($s in $samples) {
+  python scripts/parameterize_ear_remesh.py --sample_id $s --side L --mesh "data/clean_mesh/${s}_L.ply" --landmarks "data/landmarks/${s}_L_landmarks.csv"
+}
 ```
 
 默认参数：
@@ -108,13 +125,13 @@ output/remesh/<sample>_<side>/<region_id>_remesh.ply
 生成所有当前样本、所有 region 的 QC 图：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T076_L T077_L
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L
 ```
 
 只诊断重点问题区域：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T076_L T077_L --region_ids T001 T008
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T005 T009
 ```
 
 输出：
@@ -131,45 +148,51 @@ output/qc_visualizations/qc_visualization_summary.csv
 
 这些图用于判断 region 失败到底是 landmark 组合问题、边界最短路径问题、patch 过窄问题，还是 UV 覆盖问题。
 
-## 7. 当前 QC 结果
+## 7. 当前四样本 QC 结果
 
-基于 T076_L 与 T077_L 的 12 区域结果：
+基于 `T013_L/T076_L/T077_L/T078_L` 的 13 区域结果：
 
 ```text
-T076_L: PASS=2, WARNING=8, FAIL=2
-T077_L: PASS=1, WARNING=10, FAIL=1
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=0, WARNING=0,  FAIL=13  (QC 可视化严格判定)
 共同 PASS region: 0
+完全无 FAIL region: 0
 ```
 
-最严重的区域：
+普通 remesh 命令中，`T078_L / T005` 会显示为 `WARNING`，但 QC 可视化会把它判为 `FAIL`，因为该 region 仍有 `degenerate_faces=1`。因此以进入 W3 为目标时，应采用 QC 可视化汇总中的严格判定。
+
+四样本 region 汇总的关键现象：
 
 ```text
-T001: 两个样本都 FAIL，total unmapped = 31
-T008: T076 FAIL，T077 WARNING，total unmapped = 28
+T078_L 多数 region: patch_face_count=1, unmapped_count=45, degenerate_faces=1
+T078_L / T005: patch_face_count=1215, unmapped_count=2, degenerate_faces=1
+T078_L / T009: patch_face_count=161, unmapped_count=16, degenerate_faces=0
 ```
 
 当前判断：
 
-1. 问题不是单纯 QC 阈值太严格。
-2. 问题主要来自部分 region 的 patch/UV 覆盖不足。
-3. 例如 `T076_L / T008` 的 `patch_faces=252`，且 24/45 个 template 点 unmapped，说明提取到的 patch 过窄，无法覆盖完整标准三角域。
-4. 不建议优先通过提高 `resolution` 或放宽 QC 解决；这可能只会产生更多 unmapped 点，或者掩盖问题。
+1. 四个样本都能完成脚本运行并产出 points/faces/features/QC。
+2. T013/T076/T077 的结果说明主流程基本可用，但多数 region 仍处于 WARNING，需要逐图确认是否可接受或需要调整。
+3. T078 不是简单的坐标系大错配；其 landmark 到 mesh 的最近距离正常，但 region patch 大面积退化，优先怀疑当前 region table 在 T078 形态上不稳定，或最短路径边界选到了不合适的 patch。
+4. 当前仍不建议盲目放宽 QC 或直接进入 W3 PCA。
 
 ## 8. 当前处理策略
 
 当前按以下优先级推进：
 
 ```text
-T0：用更多真实样本验证 region table 的稳定性。
+T0：继续用真实样本验证 region table 的稳定性。
 T1：调整 region table，尝试增加 region、拆分 region、替换不稳定 landmark 组合。
 T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选择策略或参数调整。
 ```
 
 具体原则：
 
-1. 先用更多样本验证，不急着进入 W3。
-2. 优先修 `T001`、`T008` 等高 unmapped 区域。
-3. 不盲目提高 `resolution`。
+1. 先打开 `output/qc_visualizations/T078_L/*.png`，确认 T078 的 patch 退化位置。
+2. 优先分析 `T005` 和 `T009`，因为它们在 T078 中不是完全 1-face 退化，最有可能提供调整 region table 的线索。
+3. 对 T013/T076/T077，优先关注 `T007/T002/T004/T013/T008` 等三样本表现较好的 region。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
 5. W3 只使用多个样本在同一 region 上同时 `PASS` 的区域。
 
@@ -223,6 +246,7 @@ output/parameterized_points/<sample>_<side>_region_features.csv
 
 ```text
 output/parameterized_points/<sample>_<side>_remesh_qc.csv
+output/qc_visualizations/qc_visualization_summary.csv
 ```
 
 建议进入 W3 的最低条件：
@@ -234,49 +258,7 @@ unmapped_count == 0
 degenerate_faces == 0
 ```
 
-## 10. 项目结构
-
-```text
-.
-├── README.md
-├── requirements.txt
-├── config/
-│   └── region_table.csv
-├── data/
-│   ├── clean_mesh/
-│   │   ├── T076_L.ply
-│   │   └── T077_L.ply
-│   └── landmarks/
-│       ├── T076_L_landmarks.csv
-│       └── T077_L_landmarks.csv
-├── docs/
-│   ├── remesh_usage_w2.md
-│   ├── w3_pca_average_ear_technical_route.md
-│   └── non_remesh_code_assessment.md
-├── ear_param/
-│   ├── remesh.py
-│   ├── qc_visualization.py
-│   ├── io_utils.py
-│   ├── core.py
-│   ├── run.py
-│   ├── synthetic.py
-│   └── visualization.py
-├── scripts/
-│   ├── parameterize_ear_remesh.py
-│   ├── visualize_remesh_qc.py
-│   ├── parameterize_ear.py
-│   └── validate_data.py
-├── tests/
-│   ├── test_remesh.py
-│   ├── test_qc_visualization.py
-│   └── test_core.py
-└── output/
-    ├── parameterized_points/
-    ├── remesh/
-    └── qc_visualizations/
-```
-
-## 11. 当前主线文件
+## 10. 当前主线文件
 
 | 文件 | 作用 |
 |---|---|
@@ -284,12 +266,11 @@ degenerate_faces == 0
 | `ear_param/qc_visualization.py` | remesh QC 可视化 |
 | `scripts/parameterize_ear_remesh.py` | W2 remesh 命令行入口 |
 | `scripts/visualize_remesh_qc.py` | QC 可视化命令行入口 |
-| `tests/test_remesh.py` | remesh 单元测试 |
-| `tests/test_qc_visualization.py` | QC 可视化测试 |
 | `docs/remesh_usage_w2.md` | W2 使用说明 |
+| `docs/qc_visualization_and_region_strategy.md` | QC 与 region table 优化策略 |
 | `docs/w3_pca_average_ear_technical_route.md` | W3 PCA 平均耳技术路线 |
 
-## 12. Legacy 代码说明
+## 11. Legacy 代码说明
 
 仓库中仍保留早期参数化采样/KDTree 插值路线：
 
@@ -310,7 +291,7 @@ tests/test_core.py
 docs/non_remesh_code_assessment.md
 ```
 
-## 13. 测试
+## 12. 测试
 
 运行全部测试：
 
@@ -326,7 +307,7 @@ python -m pytest -q
 
 备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。
 
-## 14. W3 前置条件
+## 13. W3 前置条件
 
 W3 不应再读取原始高密度 mesh，也不应重新做 remesh。W3 的可信输入是 W2 合格输出：
 
@@ -336,7 +317,7 @@ W3 不应再读取原始高密度 mesh，也不应重新做 remesh。W3 的可�
 *_remesh_qc.csv
 ```
 
-当前不建议直接进入 W3 正式 PCA。原因是 T076/T077 暂无共同 PASS region。下一阶段应先通过 T0/T1/T2 得到多个样本在同一 region 上同时 PASS 的数据。
+当前不建议直接进入 W3 正式 PCA。原因是四个样本暂无共同 PASS region。下一阶段应先通过 T0/T1/T2 得到多个样本在同一 region 上同时 PASS 的数据。
 
 W3 技术路线详见：
 
@@ -344,12 +325,13 @@ W3 技术路线详见：
 docs/w3_pca_average_ear_technical_route.md
 ```
 
-## 15. 文档维护规则
+## 14. 文档维护规则
 
 每次代码调整、功能开发、数据流程变化或 QC 结论变化后，都应同步更新：
 
 1. `README.md`：记录当前项目真实状态、主命令、当前结论。
 2. `docs/remesh_usage_w2.md`：记录 W2 使用方法、QC 判定和诊断流程。
-3. `docs/w3_pca_average_ear_technical_route.md`：如果 W2 输出契约或 W3 前置条件变化，需要同步更新。
+3. `docs/qc_visualization_and_region_strategy.md`：记录 QC 证据、region table 调整策略。
+4. `docs/w3_pca_average_ear_technical_route.md`：如果 W2 输出契约或 W3 前置条件变化，需要同步更新。
 
 不要让 README 停留在旧样本、旧 region table 或旧结论上。
