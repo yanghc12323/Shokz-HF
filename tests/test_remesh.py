@@ -12,6 +12,7 @@ from ear_param.remesh import (
     build_mesh_adjacency,
     build_region_remesh,
     build_region_remesh_mesh,
+    classify_remesh_qc_status,
     build_triangle_boundary_paths,
     compute_region_feature_values,
     extract_patch_faces,
@@ -264,3 +265,10 @@ def test_build_region_remesh_mesh_uses_template_faces(single_triangle_mesh, tria
     assert len(mesh.vertices) == len(result.sample_points_3d)
     assert len(mesh.faces) == len(result.template.faces)
     np.testing.assert_array_equal(mesh.faces, result.template.faces)
+
+
+def test_classify_remesh_qc_status_uses_shared_policy():
+    assert classify_remesh_qc_status(45, 0, 0) == "PASS"
+    assert classify_remesh_qc_status(45, 1, 0) == "WARNING"
+    assert classify_remesh_qc_status(45, 10, 0) == "FAIL"
+    assert classify_remesh_qc_status(45, 0, 1) == "FAIL"

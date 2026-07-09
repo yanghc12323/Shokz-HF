@@ -1,7 +1,7 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
 > 适用阶段：W2 真实样本 remesh、QC 与 region table 优化  
-> 更新时间：2026-07-08  
+> 更新时间：2026-07-09  
 > 主入口：`scripts/parameterize_ear_remesh.py`  
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
@@ -110,7 +110,7 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L
 只看重点区域：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T005 T009
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T001 T002 T009
 ```
 
 输出：
@@ -139,22 +139,24 @@ QC 图的用途是定位问题原因，而不是直接调阈值。
 T013_L: PASS=2, WARNING=10, FAIL=1
 T076_L: PASS=2, WARNING=11, FAIL=0
 T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=0, WARNING=0,  FAIL=13
+T078_L: PASS=3, WARNING=9,  FAIL=1
 共同 PASS region: 0
-完全无 FAIL region: 0
+完全无 FAIL region: 12
 ```
 
-注意：普通 remesh CLI 中 `T078_L / T005` 为 `WARNING`，但 QC 可视化汇总中为 `FAIL`，原因是它存在 `degenerate_faces=1`。进入 W3 前应使用更严格的 QC 可视化汇总。
+注意：remesh CLI 与 QC 可视化现在已经使用同一套 PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
 
 T078 的关键异常：
 
 ```text
-多数 region: patch_face_count=1, unmapped_count=45, degenerate_faces=1
-T005: patch_face_count=1215, unmapped_count=2, degenerate_faces=1
-T009: patch_face_count=161, unmapped_count=16, degenerate_faces=0
+T001: patch_face_count=7942, unmapped_count=2, degenerate_faces=0, status=WARNING
+T002: patch_face_count=24333, unmapped_count=0, degenerate_faces=0, status=PASS
+T008: patch_face_count=10428, unmapped_count=0, degenerate_faces=0, status=PASS
+T009: patch_face_count=195, unmapped_count=15, degenerate_faces=0, status=FAIL
+T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
 ```
 
-T078 的 landmark 到 mesh 最近距离正常，因此不优先判断为坐标系整体错配。更可能的问题是当前 region table 在 T078 形态上不稳定，或最短路径 boundary 围出了错误或退化 patch。
+更新后的 T078 PLY 明显改善了结果，说明上一版失败主要与数据质量/mesh 版本有关。当前 T009 仍是主要失败区域，其它无 FAIL 区域应优先通过 region table 优化从 WARNING 推进到 PASS。
 
 ## 7. QC 判定规则
 

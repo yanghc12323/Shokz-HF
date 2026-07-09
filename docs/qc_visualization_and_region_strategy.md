@@ -1,6 +1,6 @@
 ﻿# Remesh QC 可视化与 Region Table 优化策略
 
-> 更新时间：2026-07-08  
+> 更新时间：2026-07-09  
 > 适用范围：W2 真实样本 QC、region table 诊断、W3 前置筛选
 
 ## 1. 当前问题
@@ -11,53 +11,65 @@
 T013_L: PASS=2, WARNING=10, FAIL=1
 T076_L: PASS=2, WARNING=11, FAIL=0
 T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=0, WARNING=0,  FAIL=13
+T078_L: PASS=3, WARNING=9,  FAIL=1
 共同 PASS region: 0
-完全无 FAIL region: 0
+完全无 FAIL region: 12
 ```
 
 这说明当前还不能直接进入 W3 正式 PCA。W3 需要多个样本在同一个 region 上同时 `PASS`，否则该 region 的 PCA 输入矩阵会包含 NaN 或样本数不足。
 
 ## 2. 主要证据
 
-T078 是本轮最关键的问题样本：
+T078 是本轮最关键的问题样本。更新 PLY 后，结果较之前大幅改善，但仍未达到 W3 输入标准：
 
 ```text
-T078_L 多数 region:
-patch_face_count = 1
-unmapped_count = 45 / 45
-degenerate_faces = 1
-status = FAIL
-
-T078_L / T005:
-patch_face_count = 1215
+T078_L / T001:
+patch_face_count = 7942
 unmapped_count = 2 / 45
-degenerate_faces = 1
-status = FAIL
+degenerate_faces = 0
+status = WARNING
+
+T078_L / T002:
+patch_face_count = 24333
+unmapped_count = 0 / 45
+degenerate_faces = 0
+status = PASS
+
+T078_L / T008:
+patch_face_count = 10428
+unmapped_count = 0 / 45
+degenerate_faces = 0
+status = PASS
 
 T078_L / T009:
-patch_face_count = 161
-unmapped_count = 16 / 45
+patch_face_count = 195
+unmapped_count = 15 / 45
 degenerate_faces = 0
 status = FAIL
+
+T078_L / T010:
+patch_face_count = 18992
+unmapped_count = 0 / 45
+degenerate_faces = 0
+status = PASS
 ```
 
-T078 的 landmark 与 mesh 坐标整体匹配，最近 mesh 顶点距离处于正常范围。因此不优先判断为 mesh 和 landmark 坐标系整体错配。更合理的判断是：当前 region table 的部分 landmark 三角组合在 T078 的耳形上不稳定，或 mesh 最短路径 boundary 围出了错误/退化 patch。
+T078 的 landmark 与 mesh 坐标整体匹配，新 PLY 使大多数 region 脱离了完全退化状态。因此当前不再把 T078 视为整体异常样本；更合理的判断是：T009 仍存在局部区域覆盖不足，其它无 FAIL 区域需要继续微调以减少 unmapped 点。
 
 ## 3. 三样本参考结果
 
 如果暂时排除 T078，只看 `T013_L/T076_L/T077_L`，多数 region 至少可以完成可检查输出：
 
 ```text
-三样本无 FAIL region:
+四样本无 FAIL region:
 T001, T002, T003, T004, T005, T006, T007, T008, T010, T011, T012, T013
 
-三样本表现较好的候选:
-T007: PASS=2, WARNING=1, FAIL=0, total_unmapped=2
-T002: PASS=1, WARNING=2, FAIL=0, total_unmapped=2
-T004: PASS=1, WARNING=2, FAIL=0, total_unmapped=2
-T013: PASS=1, WARNING=2, FAIL=0, total_unmapped=5
-T008: PASS=1, WARNING=2, FAIL=0, total_unmapped=7
+四样本表现较好的候选:
+T002: PASS=2, WARNING=2, FAIL=0, total_unmapped=2
+T007: PASS=2, WARNING=2, FAIL=0, total_unmapped=5
+T008: PASS=2, WARNING=2, FAIL=0, total_unmapped=7
+T004: PASS=1, WARNING=3, FAIL=0, total_unmapped=3
+T010: PASS=1, WARNING=3, FAIL=0, total_unmapped=3
 ```
 
 这些结果说明 remesh 主流程本身是可工作的，但 region table 仍需要被更多样本挑战。
@@ -129,12 +141,13 @@ output/qc_visualizations/qc_visualization_summary.csv
 T078 的优先诊断顺序：
 
 ```text
-1. 先看 output/qc_visualizations/T078_L/T005_qc.png
-2. 再看 output/qc_visualizations/T078_L/T009_qc.png
-3. 最后看 patch_face_count=1 的其它 region
+1. 先看 output/qc_visualizations/T078_L/T002_qc.png
+2. 再看 output/qc_visualizations/T078_L/T008_qc.png
+3. 再看 output/qc_visualizations/T078_L/T009_qc.png
+4. 再看 output/qc_visualizations/T078_L/T010_qc.png
 ```
 
-原因：`T005` 和 `T009` 至少提取到了一定数量的 patch faces，更容易判断当前边界为什么覆盖不足。大量 `patch_face_count=1` 的 region 可能已经退化到无法直接解释。
+原因：`T002/T008/T010` 已经在 T078 上 PASS，可作为优先候选；`T009` 是当前主要失败区域，需要单独分析边界和 patch 覆盖。
 
 调整方向：
 
@@ -147,7 +160,7 @@ T078 的优先诊断顺序：
 重点 region 的快速诊断命令：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T005 T009
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T002 T008 T009 T010
 ```
 
 ## 9. T2：参数或算法策略调整

@@ -119,6 +119,24 @@ class RegionRemeshResult:
     sample_points_3d: np.ndarray
 
 
+def classify_remesh_qc_status(
+    sample_point_count: int,
+    unmapped_count: int,
+    degenerate_face_count: int,
+    *,
+    fail_unmapped_ratio: float = 0.2,
+) -> str:
+    """Classify one remesh region with the shared W2 QC policy."""
+    n_samples = max(int(sample_point_count), 1)
+    n_unmapped = int(unmapped_count)
+    n_degenerate = int(degenerate_face_count)
+    if n_unmapped / n_samples > fail_unmapped_ratio or n_degenerate > 0:
+        return "FAIL"
+    if n_unmapped > 0:
+        return "WARNING"
+    return "PASS"
+
+
 def build_region_remesh(
     mesh: trimesh.Trimesh,
     landmarks: pd.DataFrame,

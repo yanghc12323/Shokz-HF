@@ -14,7 +14,7 @@ import numpy as np
 import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from .remesh import RegionRemeshResult
+from .remesh import RegionRemeshResult, classify_remesh_qc_status
 
 
 def classify_region_qc(sample_tag: str, result: RegionRemeshResult) -> dict[str, object]:
@@ -22,11 +22,7 @@ def classify_region_qc(sample_tag: str, result: RegionRemeshResult) -> dict[str,
     n_samples = int(len(result.sample_points_3d))
     n_unmapped = int(result.located_samples.unmapped_count)
     n_degenerate = int(result.parameterization.degenerate_face_count)
-    status = "PASS"
-    if n_unmapped > 0:
-        status = "WARNING"
-    if n_unmapped / max(n_samples, 1) > 0.2 or n_degenerate > 0:
-        status = "FAIL"
+    status = classify_remesh_qc_status(n_samples, n_unmapped, n_degenerate)
 
     return {
         "sample_tag": sample_tag,

@@ -2,7 +2,7 @@
 
 > 当前主线：论文式 patch-based remesh  
 > 当前阶段：W2 remesh 主流程已可运行，正在做四样本 QC 与 region table 优化  
-> 更新时间：2026-07-08
+> 更新时间：2026-07-09
 
 ## 1. 项目目标
 
@@ -131,7 +131,7 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L
 只诊断重点问题区域：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T005 T009
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T001 T002 T009
 ```
 
 输出：
@@ -156,26 +156,28 @@ output/qc_visualizations/qc_visualization_summary.csv
 T013_L: PASS=2, WARNING=10, FAIL=1
 T076_L: PASS=2, WARNING=11, FAIL=0
 T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=0, WARNING=0,  FAIL=13  (QC 可视化严格判定)
+T078_L: PASS=3, WARNING=9,  FAIL=1  (已使用更新后的 landmark 表和 PLY)
 共同 PASS region: 0
-完全无 FAIL region: 0
+完全无 FAIL region: 12
 ```
 
-普通 remesh 命令中，`T078_L / T005` 会显示为 `WARNING`，但 QC 可视化会把它判为 `FAIL`，因为该 region 仍有 `degenerate_faces=1`。因此以进入 W3 为目标时，应采用 QC 可视化汇总中的严格判定。
+`scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 现在使用同一套 PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
 
 四样本 region 汇总的关键现象：
 
 ```text
-T078_L 多数 region: patch_face_count=1, unmapped_count=45, degenerate_faces=1
-T078_L / T005: patch_face_count=1215, unmapped_count=2, degenerate_faces=1
-T078_L / T009: patch_face_count=161, unmapped_count=16, degenerate_faces=0
+T078_L / T001: patch_face_count=7942, unmapped_count=2, degenerate_faces=0, status=WARNING
+T078_L / T002: patch_face_count=24333, unmapped_count=0, degenerate_faces=0, status=PASS
+T078_L / T008: patch_face_count=10428, unmapped_count=0, degenerate_faces=0, status=PASS
+T078_L / T009: patch_face_count=195, unmapped_count=15, degenerate_faces=0, status=FAIL
+T078_L / T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
 ```
 
 当前判断：
 
 1. 四个样本都能完成脚本运行并产出 points/faces/features/QC。
-2. T013/T076/T077 的结果说明主流程基本可用，但多数 region 仍处于 WARNING，需要逐图确认是否可接受或需要调整。
-3. T078 不是简单的坐标系大错配；其 landmark 到 mesh 的最近距离正常，但 region patch 大面积退化，优先怀疑当前 region table 在 T078 形态上不稳定，或最短路径边界选到了不合适的 patch。
+2. 更新后的 T078 PLY 显著改善了结果：T002、T008、T010 已经达到 PASS。
+3. 目前四样本仍没有共同 PASS region，但 12 个 region 已经完全无 FAIL，下一步重点从“修复退化”转为“把多个 WARNING 区域优化到 PASS”。
 4. 当前仍不建议盲目放宽 QC 或直接进入 W3 PCA。
 
 ## 8. 当前处理策略
@@ -191,8 +193,8 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 具体原则：
 
 1. 先打开 `output/qc_visualizations/T078_L/*.png`，确认 T078 的 patch 退化位置。
-2. 优先分析 `T005` 和 `T009`，因为它们在 T078 中不是完全 1-face 退化，最有可能提供调整 region table 的线索。
-3. 对 T013/T076/T077，优先关注 `T007/T002/T004/T013/T008` 等三样本表现较好的 region。
+2. 优先分析 `T002/T007/T008/T004/T010`：这些区域在四样本中无 FAIL，且 PASS 数或 unmapped 总量相对更好。
+3. 单独分析 `T009`，它是当前四样本中唯一仍有两个 FAIL 的区域。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
 5. W3 只使用多个样本在同一 region 上同时 `PASS` 的区域。
 

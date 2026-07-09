@@ -27,6 +27,7 @@ from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
 from ear_param.remesh import (
     build_region_remesh,
     build_region_remesh_mesh,
+    classify_remesh_qc_status,
     compute_region_feature_values,
 )
 
@@ -189,15 +190,11 @@ Example:
             ))
             feature_records.append(feature_record)
 
-            status = "PASS"
-            if n_unmapped > 0:
-                status = "WARNING"
-            if n_unmapped / max(n_samples, 1) > 0.2:
-                status = "FAIL"
+            status = classify_remesh_qc_status(n_samples, n_unmapped, n_degenerate)
 
             mesh_path = mesh_out_dir / f"{rid}_remesh.ply"
             mesh_exported = False
-            if n_unmapped == 0:
+            if status == "PASS":
                 build_region_remesh_mesh(result).export(mesh_path)
                 mesh_exported = True
 

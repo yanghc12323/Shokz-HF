@@ -1,9 +1,9 @@
 ﻿# W3 PCA 平均耳技术路线说明
 
 > 面向对象：后续接手本项目的 AI 或工程师  
-> 更新时间：2026-07-08  
+> 更新时间：2026-07-09  
 > 上游输入：W2 patch-based remesh 合格输出  
-> 当前状态：W3 尚未正式实现；四样本暂无共同 PASS region，因此当前重点仍是 W2 region table 优化
+> 当前状态：W3 尚未正式实现；更新 T078 PLY 后四样本仍暂无共同 PASS region，因此当前重点仍是 W2 region table 优化
 
 ## 1. 一句话背景
 
@@ -28,11 +28,11 @@ T078_L
 T013_L: PASS=2, WARNING=10, FAIL=1
 T076_L: PASS=2, WARNING=11, FAIL=0
 T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=0, WARNING=0,  FAIL=13
+T078_L: PASS=3, WARNING=9,  FAIL=1
 共同 PASS region: 0
 ```
 
-因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。当前四样本没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
+因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。更新 T078 PLY 后，四样本无 FAIL region 已增加到 12 个，但当前四样本仍没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
 
 当前正确顺序是：
 
