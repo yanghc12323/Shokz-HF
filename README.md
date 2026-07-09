@@ -36,7 +36,7 @@ data/clean_mesh/T078_L.ply
 data/landmarks/T078_L_landmarks.csv
 ```
 
-当前 `config/region_table.csv` 包含 13 个三角 region，每个 region 当前 `resolution=8`，即每区 45 个 template 点、64 个 template faces。
+当前 `config/region_table.csv` 包含 13 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。历史 r8 输出仍保留在旧输出目录中，用于和新 r24 结果对比。
 
 旧的 `T001_L` 输入和输出已经从当前主线移除。不要再把旧 T001 结果作为当前 13 区域方案的有效结果使用。
 
@@ -104,21 +104,27 @@ foreach ($s in $samples) {
 
 ```text
 --regions config/region_table.csv
---out_dir output/parameterized_points
---mesh_out_dir output/remesh
+--out_dir output/parameterized_points_r24/raw
+--mesh_out_dir output/remesh_r24/raw
+--repaired_out_dir output/parameterized_points_r24/repaired
+--repaired_mesh_out_dir output/remesh_r24/repaired
 ```
 
 输出文件：
 
 ```text
-output/parameterized_points/<sample>_<side>_remesh_points.csv
-output/parameterized_points/<sample>_<side>_remesh_faces.csv
-output/parameterized_points/<sample>_<side>_region_features.csv
-output/parameterized_points/<sample>_<side>_remesh_qc.csv
-output/remesh/<sample>_<side>/<region_id>_remesh.ply
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
+output/remesh_r24/raw/<sample>_<side>/<region_id>_remesh.ply
+output/remesh_r24/repaired/<sample>_<side>/<region_id>_remesh_repaired.ply
 ```
 
-说明：只有 `unmapped_count == 0` 的 region 会导出 PLY。
+说明：raw PLY 只导出原始 PASS 区域；repaired PLY 允许 raw WARNING 在补点成功后导出。raw FAIL 区域仍不补点、不导出。
 
 ## 6. 运行 QC 可视化
 
@@ -137,20 +143,24 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --re
 输出：
 
 ```text
-output/qc_visualizations/<sample_tag>/<region_id>_qc.png
-output/qc_visualizations/qc_visualization_summary.csv
+output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 ```
 
-每张 QC 图包含：
+每个 region 会输出两张 QC 图：
 
-1. 左侧 3D 图：patch faces、三条 landmark boundary path、三个 landmark 点。
-2. 右侧 2D 图：UV patch、固定 template samples、红色 unmapped template 点。
+1. `raw` 图：显示未修补前的原始映射结果，右侧红色叉号为 raw unmapped template 点。
+2. `repaired` 图：显示修补后的结果，右侧橙色三角为 repaired 点，红色叉号为仍未修补点。
+
+两张图左侧都显示 3D patch faces、三条 landmark boundary path 和三个 landmark 点；右侧都显示 2D UV patch 与固定 template samples。
 
 这些图用于判断 region 失败到底是 landmark 组合问题、边界最短路径问题、patch 过窄问题，还是 UV 覆盖问题。
 
-## 7. 当前四样本 QC 结果
+## 7. 当前 QC 结果
 
-基于 `T013_L/T076_L/T077_L/T078_L` 的 13 区域结果：
+历史 r8 四样本 baseline：
 
 ```text
 T013_L: PASS=2, WARNING=10, FAIL=1
@@ -161,23 +171,41 @@ T078_L: PASS=3, WARNING=9,  FAIL=1  (已使用更新后的 landmark 表和 PLY)
 完全无 FAIL region: 12
 ```
 
-`scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 现在使用同一套 PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
+当前 r24 四样本结果：
+
+```text
+raw:
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=3, WARNING=9,  FAIL=1
+
+repaired:
+T013_L: PASS=12, WARNING=0, FAIL=1
+T076_L: PASS=13, WARNING=0, FAIL=0
+T077_L: PASS=13, WARNING=0, FAIL=0
+T078_L: PASS=12, WARNING=0, FAIL=1
+```
+
+`scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
+
+repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。raw FAIL 不修补。
 
 四样本 region 汇总的关键现象：
 
 ```text
-T078_L / T001: patch_face_count=7942, unmapped_count=2, degenerate_faces=0, status=WARNING
-T078_L / T002: patch_face_count=24333, unmapped_count=0, degenerate_faces=0, status=PASS
-T078_L / T008: patch_face_count=10428, unmapped_count=0, degenerate_faces=0, status=PASS
-T078_L / T009: patch_face_count=195, unmapped_count=15, degenerate_faces=0, status=FAIL
-T078_L / T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
+T078_L / T001: raw unmapped=2/325, repaired PASS
+T078_L / T002: raw PASS
+T078_L / T003: raw unmapped=23/325, repaired PASS
+T078_L / T009: raw unmapped=96/325, raw FAIL, repaired FAIL
+T078_L / T010: raw PASS
 ```
 
 当前判断：
 
 1. 四个样本都能完成脚本运行并产出 points/faces/features/QC。
-2. 更新后的 T078 PLY 显著改善了结果：T002、T008、T010 已经达到 PASS。
-3. 目前四样本仍没有共同 PASS region，但 12 个 region 已经完全无 FAIL，下一步重点从“修复退化”转为“把多个 WARNING 区域优化到 PASS”。
+2. r24 输出已经在四个样本上验证可运行，每个 region 输出 325 点、576 面。
+3. repaired 层能把 raw WARNING 区域补成 PASS，同时保留 raw FAIL 区域。
 4. 当前仍不建议盲目放宽 QC 或直接进入 W3 PCA。
 
 ## 8. 当前处理策略
@@ -192,7 +220,7 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 
 具体原则：
 
-1. 先打开 `output/qc_visualizations/T078_L/*.png`，确认 T078 的 patch 退化位置。
+1. 先对比 `output/qc_visualizations_r24/raw/T078_L/*.png` 与 `output/qc_visualizations_r24/repaired/T078_L/*.png`，确认 T078 的 patch 退化位置和补点效果。
 2. 优先分析 `T002/T007/T008/T004/T010`：这些区域在四样本中无 FAIL，且 PASS 数或 unmapped 总量相对更好。
 3. 单独分析 `T009`，它是当前四样本中唯一仍有两个 FAIL 的区域。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
@@ -205,7 +233,8 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 路径：
 
 ```text
-output/parameterized_points/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
 ```
 
 关键字段：
@@ -227,7 +256,8 @@ W3 必须使用 `region_id + region_point_id` 对齐不同样本的点。
 路径：
 
 ```text
-output/parameterized_points/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
 ```
 
 faces 是固定 template faces。W3 不应重新 triangulate。
@@ -237,7 +267,7 @@ faces 是固定 template faces。W3 不应重新 triangulate。
 路径：
 
 ```text
-output/parameterized_points/<sample>_<side>_region_features.csv
+output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
 ```
 
 该表记录 landmark 三角形边长、周长、面积、内角、质心、法向和 landmark 吸附距离，满足 W2 “根据选取的特征点计算相关特征值”的交付要求。
@@ -247,8 +277,10 @@ output/parameterized_points/<sample>_<side>_region_features.csv
 路径：
 
 ```text
-output/parameterized_points/<sample>_<side>_remesh_qc.csv
-output/qc_visualizations/qc_visualization_summary.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 ```
 
 建议进入 W3 的最低条件：
@@ -304,7 +336,7 @@ python -m pytest -q
 当前验证结果：
 
 ```text
-86 passed
+91 passed
 ```
 
 备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。

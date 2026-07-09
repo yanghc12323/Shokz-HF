@@ -3,7 +3,7 @@
 > 面向对象：后续接手本项目的 AI 或工程师  
 > 更新时间：2026-07-09  
 > 上游输入：W2 patch-based remesh 合格输出  
-> 当前状态：W3 尚未正式实现；更新 T078 PLY 后四样本仍暂无共同 PASS region，因此当前重点仍是 W2 region table 优化
+> 当前状态：W3 尚未正式实现；W2 主线已切换到 resolution=24，并引入 raw/repaired 两层输出
 
 ## 1. 一句话背景
 
@@ -22,7 +22,7 @@ T077_L
 T078_L
 ```
 
-当前 13 区域 QC 可视化结果：
+历史 r8 13 区域 QC 可视化结果：
 
 ```text
 T013_L: PASS=2, WARNING=10, FAIL=1
@@ -33,6 +33,24 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 ```
 
 因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。更新 T078 PLY 后，四样本无 FAIL region 已增加到 12 个，但当前四样本仍没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
+
+当前 r24 已在四个真实样本上完成验证：
+
+```text
+raw:
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=3, WARNING=9,  FAIL=1
+
+repaired:
+T013_L: PASS=12, WARNING=0, FAIL=1
+T076_L: PASS=13, WARNING=0, FAIL=0
+T077_L: PASS=13, WARNING=0, FAIL=0
+T078_L: PASS=12, WARNING=0, FAIL=1
+```
+
+r24 repaired 输出适合用于补齐 PLY 可视化；是否进入 W3 PCA，需要后续明确采用 raw PASS-only 还是 repaired exportable 数据。默认更保守的 W3 方案仍使用 raw PASS-only。
 
 当前正确顺序是：
 
@@ -48,15 +66,18 @@ W3：只对共同 PASS 的 region 做 PCA。
 W3 不读取原始高密度 mesh，不重新找 landmark，不重新做 harmonic parameterization。W3 的可信输入只能来自 W2 输出：
 
 ```text
-output/parameterized_points/<sample>_<side>_remesh_points.csv
-output/parameterized_points/<sample>_<side>_remesh_faces.csv
-output/parameterized_points/<sample>_<side>_remesh_qc.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
 ```
 
 可选读取：
 
 ```text
-output/parameterized_points/<sample>_<side>_region_features.csv
+output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
 ```
 
 `region_features` 用于解释 landmark 尺寸、角度、面积差异，不是 PCA 坐标矩阵的必需输入。

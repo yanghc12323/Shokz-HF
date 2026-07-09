@@ -9,6 +9,13 @@ import trimesh
 
 import ear_param.remesh as remesh
 from ear_param.remesh import (
+    BoundaryPaths,
+    LocatedSamples,
+    PatchExtraction,
+    PatchParameterization,
+    RegionRemeshResult,
+    SnappedLandmark,
+    SubdivisionTemplate,
     build_mesh_adjacency,
     build_region_remesh,
     build_region_remesh_mesh,
@@ -20,6 +27,7 @@ from ear_param.remesh import (
     locate_uv_samples_in_faces,
     make_subdivision_template,
     map_samples_to_3d,
+    repair_unmapped_samples,
     snap_landmarks_to_vertices,
 )
 
@@ -272,3 +280,81 @@ def test_classify_remesh_qc_status_uses_shared_policy():
     assert classify_remesh_qc_status(45, 1, 0) == "WARNING"
     assert classify_remesh_qc_status(45, 10, 0) == "FAIL"
     assert classify_remesh_qc_status(45, 0, 1) == "FAIL"
+
+
+def _repair_test_result(unmapped_ids: list[int]) -> RegionRemeshResult:
+    template = make_subdivision_template(3)
+    vertices = np.column_stack([
+        template.uv[:, 0],
+        template.uv[:, 1],
+        np.zeros(len(template.uv)),
+    ])
+    points = vertices.copy()
+    unmapped = np.zeros(len(points), dtype=bool)
+    unmapped[unmapped_ids] = True
+    points[unmapped] = np.nan
+
+    boundary = BoundaryPaths("L1", "L2", "L3", [0, 1], [1, 2], [2, 0])
+    snapped = {
+        "L1": SnappedLandmark("L1", np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0]), 0, 0.0),
+        "L2": SnappedLandmark("L2", np.array([1.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]), 1, 0.0),
+        "L3": SnappedLandmark("L3", np.array([0.0, 1.0, 0.0]), np.array([0.0, 1.0, 0.0]), 2, 0.0),
+    }
+    patch = PatchExtraction(
+        face_ids=np.arange(len(template.faces)),
+        local_faces=template.faces,
+        local_vertices=vertices,
+        local_to_global=np.arange(len(vertices)),
+    )
+    parameterization = PatchParameterization(
+        uv=template.uv,
+        local_faces=template.faces,
+        local_vertices=vertices,
+        local_to_global=np.arange(len(vertices)),
+        original_face_ids=np.arange(len(template.faces)),
+        flipped_face_count=0,
+        degenerate_face_count=0,
+    )
+    located = LocatedSamples(
+        sample_uv=template.uv,
+        face_indices=np.where(unmapped, -1, 0),
+        barycentric=template.barycentric,
+        unmapped_mask=unmapped,
+    )
+    return RegionRemeshResult(
+        region_id="R001",
+        region_name="repair-test",
+        snapped_landmarks=snapped,
+        boundary_paths=boundary,
+        patch=patch,
+        parameterization=parameterization,
+        template=template,
+        located_samples=located,
+        sample_points_3d=points,
+    )
+
+
+def test_repair_unmapped_samples_fills_warning_vertex_and_internal_points():
+    result = _repair_test_result([0])
+
+    repaired = repair_unmapped_samples(result)
+
+    assert repaired.raw_status == "WARNING"
+    assert repaired.status == "PASS"
+    assert repaired.exportable is True
+    assert repaired.repaired_unmapped_count == 0
+    assert repaired.repaired_mask[0]
+    assert repaired.repair_methods[0] == "landmark_vertex"
+    np.testing.assert_allclose(repaired.points_3d[0], [0.0, 0.0, 0.0])
+
+
+def test_repair_unmapped_samples_does_not_repair_raw_fail_regions():
+    result = _repair_test_result([0, 1, 2])
+
+    repaired = repair_unmapped_samples(result)
+
+    assert repaired.raw_status == "FAIL"
+    assert repaired.status == "FAIL"
+    assert repaired.exportable is False
+    assert repaired.repaired_count == 0
+    assert repaired.repaired_unmapped_count == 3

@@ -119,6 +119,23 @@ class RegionRemeshResult:
     sample_points_3d: np.ndarray
 
 
+@dataclass(frozen=True)
+class RepairedSamples:
+    """Post-processed samples for export while preserving raw QC."""
+
+    points_3d: np.ndarray
+    repaired_mask: np.ndarray
+    repair_methods: np.ndarray
+    raw_status: str
+    status: str
+    exportable: bool
+    repaired_unmapped_count: int
+
+    @property
+    def repaired_count(self) -> int:
+        return int(self.repaired_mask.sum())
+
+
 def classify_remesh_qc_status(
     sample_point_count: int,
     unmapped_count: int,
@@ -135,6 +152,98 @@ def classify_remesh_qc_status(
     if n_unmapped > 0:
         return "WARNING"
     return "PASS"
+
+
+def repair_unmapped_samples(
+    result: RegionRemeshResult,
+    *,
+    fail_unmapped_ratio: float = 0.2,
+    vertex_ring_steps: int = 2,
+    smoothing_iterations: int = 80,
+) -> RepairedSamples:
+    """Repair raw WARNING unmapped samples without changing raw QC semantics."""
+    points = np.asarray(result.sample_points_3d, dtype=float).copy()
+    raw_unmapped = np.asarray(result.located_samples.unmapped_mask, dtype=bool)
+    n_samples = len(points)
+    raw_status = classify_remesh_qc_status(
+        n_samples,
+        int(raw_unmapped.sum()),
+        int(result.parameterization.degenerate_face_count),
+        fail_unmapped_ratio=fail_unmapped_ratio,
+    )
+    repair_methods = np.full(n_samples, "mapped", dtype=object)
+    repair_methods[raw_unmapped] = "unrepaired"
+    repaired_mask = np.zeros(n_samples, dtype=bool)
+
+    if raw_status == "FAIL":
+        return RepairedSamples(
+            points_3d=points,
+            repaired_mask=repaired_mask,
+            repair_methods=repair_methods,
+            raw_status=raw_status,
+            status="FAIL",
+            exportable=False,
+            repaired_unmapped_count=int(raw_unmapped.sum()),
+        )
+    if raw_status == "PASS":
+        return RepairedSamples(
+            points_3d=points,
+            repaired_mask=repaired_mask,
+            repair_methods=repair_methods,
+            raw_status=raw_status,
+            status="PASS",
+            exportable=True,
+            repaired_unmapped_count=0,
+        )
+
+    bary = np.asarray(result.template.barycentric, dtype=float)
+    lm_ids = [
+        result.boundary_paths.lm_a,
+        result.boundary_paths.lm_b,
+        result.boundary_paths.lm_c,
+    ]
+    for corner_id, lm_id in enumerate(lm_ids):
+        corner_rows = np.where(np.isclose(bary[:, corner_id], 1.0))[0]
+        if len(corner_rows) != 1:
+            continue
+        sample_id = int(corner_rows[0])
+        if raw_unmapped[sample_id] and lm_id in result.snapped_landmarks:
+            points[sample_id] = result.snapped_landmarks[lm_id].snapped_xyz
+            repaired_mask[sample_id] = True
+            repair_methods[sample_id] = "landmark_vertex"
+
+    remaining = raw_unmapped & ~repaired_mask
+    if remaining.any():
+        _smooth_fill_unmapped_samples(
+            points,
+            result.template.faces,
+            result.template.uv,
+            remaining,
+            fixed_mask=np.isfinite(points).all(axis=1),
+            iterations=smoothing_iterations,
+        )
+        near_vertex = bary.max(axis=1) >= 1.0 - (float(vertex_ring_steps) / result.template.resolution)
+        repaired_mask[remaining] = np.isfinite(points[remaining]).all(axis=1)
+        repair_methods[remaining & near_vertex] = "smooth_near_vertex"
+        repair_methods[remaining & ~near_vertex] = "smooth_internal"
+        repair_methods[remaining & ~repaired_mask] = "unrepaired"
+
+    repaired_unmapped = ~np.isfinite(points).all(axis=1)
+    status = "PASS" if not repaired_unmapped.any() else classify_remesh_qc_status(
+        n_samples,
+        int(repaired_unmapped.sum()),
+        int(result.parameterization.degenerate_face_count),
+        fail_unmapped_ratio=fail_unmapped_ratio,
+    )
+    return RepairedSamples(
+        points_3d=points,
+        repaired_mask=repaired_mask,
+        repair_methods=repair_methods,
+        raw_status=raw_status,
+        status=status,
+        exportable=status == "PASS",
+        repaired_unmapped_count=int(repaired_unmapped.sum()),
+    )
 
 
 def build_region_remesh(
@@ -231,9 +340,11 @@ def compute_region_feature_values(
 def build_region_remesh_mesh(
     result: RegionRemeshResult,
     drop_invalid_faces: bool = True,
+    vertices_override: np.ndarray | None = None,
 ) -> trimesh.Trimesh:
     """Build a remesh patch from mapped 3D samples and template faces."""
-    vertices = np.asarray(result.sample_points_3d, dtype=float)
+    source_vertices = result.sample_points_3d if vertices_override is None else vertices_override
+    vertices = np.asarray(source_vertices, dtype=float)
     faces = np.asarray(result.template.faces, dtype=int)
     if drop_invalid_faces:
         valid_vertices = np.isfinite(vertices).all(axis=1)
@@ -692,6 +803,38 @@ def _local_vertex_neighbors(local_faces: np.ndarray, n_vertices: int) -> list[se
             neighbors[u].add(v)
             neighbors[v].add(u)
     return neighbors
+
+
+def _smooth_fill_unmapped_samples(
+    points: np.ndarray,
+    template_faces: np.ndarray,
+    sample_uv: np.ndarray,
+    fill_mask: np.ndarray,
+    *,
+    fixed_mask: np.ndarray,
+    iterations: int,
+) -> None:
+    fixed_ids = np.where(fixed_mask)[0]
+    fill_ids = np.where(fill_mask)[0]
+    if len(fixed_ids) == 0:
+        return
+
+    fixed_uv = np.asarray(sample_uv, dtype=float)[fixed_ids]
+    for sample_id in fill_ids:
+        distances = np.linalg.norm(fixed_uv - sample_uv[sample_id], axis=1)
+        points[sample_id] = points[fixed_ids[int(np.argmin(distances))]]
+
+    neighbors = _local_vertex_neighbors(np.asarray(template_faces, dtype=int), len(points))
+    fill_set = set(int(i) for i in fill_ids)
+    fixed_mask = fixed_mask.copy()
+    for _ in range(max(int(iterations), 0)):
+        updated = points.copy()
+        for sample_id in fill_ids:
+            neighbor_ids = [n for n in neighbors[int(sample_id)] if np.isfinite(points[n]).all()]
+            if neighbor_ids:
+                updated[sample_id] = np.mean(points[neighbor_ids], axis=0)
+        points[list(fill_set)] = updated[list(fill_set)]
+        points[fixed_mask] = updated[fixed_mask]
 
 
 def _count_uv_face_quality(uv: np.ndarray, faces: np.ndarray) -> tuple[int, int]:

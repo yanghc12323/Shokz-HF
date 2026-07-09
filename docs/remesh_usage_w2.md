@@ -36,11 +36,11 @@ T078_L
 region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
 ```
 
-当前每个 region 的 `resolution=8`，所以每区：
+当前每个 region 的 `resolution=24`，所以每区：
 
 ```text
-sample_point_count = 45
-remesh_face_count = 64
+sample_point_count = 325
+remesh_face_count = 576
 ```
 
 ## 3. VSCode 命令行运行方式
@@ -84,8 +84,10 @@ foreach ($s in $samples) {
 输出目录：
 
 ```text
-output/parameterized_points/
-output/remesh/
+output/parameterized_points_r24/raw/
+output/parameterized_points_r24/repaired/
+output/remesh_r24/raw/
+output/remesh_r24/repaired/
 ```
 
 每个样本会输出：
@@ -97,7 +99,7 @@ output/remesh/
 <sample>_<side>_remesh_qc.csv
 ```
 
-只有 `unmapped_count == 0` 的 region 会输出 PLY。
+raw 目录保留原始映射结果；repaired 目录保留补点后的结果。raw PASS 直接导出 PLY；raw WARNING 在补点成功后导出 repaired PLY；raw FAIL 不补点、不导出。
 
 ## 5. 运行 QC 可视化
 
@@ -116,24 +118,23 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --re
 输出：
 
 ```text
-output/qc_visualizations/<sample_tag>/<region_id>_qc.png
-output/qc_visualizations/qc_visualization_summary.csv
+output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 ```
 
-每张图包括：
+每个 region 会输出 raw 和 repaired 两张图：
 
-1. 3D patch faces。
-2. 三条 boundary path。
-3. 三个 landmark 点。
-4. 2D UV patch。
-5. template sample 点。
-6. 红色 unmapped 点。
+1. raw 图显示未修补前的原始映射状态，红色叉号表示 raw unmapped 点。
+2. repaired 图显示补点后的状态，橙色三角表示 repaired 点，红色叉号表示仍未修补点。
+3. 两张图都包含 3D patch faces、三条 boundary path、三个 landmark 点、2D UV patch 和 template sample 点。
 
 QC 图的用途是定位问题原因，而不是直接调阈值。
 
-## 6. 当前四样本 QC 结果
+## 6. 当前 QC 结果
 
-本次四个真实样本都已完成 remesh 和 QC 可视化：
+历史 r8 四样本 baseline：
 
 ```text
 T013_L: PASS=2, WARNING=10, FAIL=1
@@ -144,19 +145,35 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 完全无 FAIL region: 12
 ```
 
-注意：remesh CLI 与 QC 可视化现在已经使用同一套 PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
+当前 r24 四样本结果：
+
+```text
+raw:
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=3, WARNING=9,  FAIL=1
+
+repaired:
+T013_L: PASS=12, WARNING=0, FAIL=1
+T076_L: PASS=13, WARNING=0, FAIL=0
+T077_L: PASS=13, WARNING=0, FAIL=0
+T078_L: PASS=12, WARNING=0, FAIL=1
+```
+
+注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING，不处理 raw FAIL。
 
 T078 的关键异常：
 
 ```text
-T001: patch_face_count=7942, unmapped_count=2, degenerate_faces=0, status=WARNING
-T002: patch_face_count=24333, unmapped_count=0, degenerate_faces=0, status=PASS
-T008: patch_face_count=10428, unmapped_count=0, degenerate_faces=0, status=PASS
-T009: patch_face_count=195, unmapped_count=15, degenerate_faces=0, status=FAIL
-T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
+T001: raw unmapped=2/325, repaired PASS
+T002: raw PASS
+T003: raw unmapped=23/325, repaired PASS
+T009: raw unmapped=96/325, raw FAIL, repaired FAIL
+T010: raw PASS
 ```
 
-更新后的 T078 PLY 明显改善了结果，说明上一版失败主要与数据质量/mesh 版本有关。当前 T009 仍是主要失败区域，其它无 FAIL 区域应优先通过 region table 优化从 WARNING 推进到 PASS。
+r24 repaired 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐，但 T009 这类 raw FAIL 仍保持失败。
 
 ## 7. QC 判定规则
 

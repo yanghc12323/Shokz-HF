@@ -1,0 +1,14 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,unmapped_count,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T013,L,T001,test,325,325,576,7,0,0,7682,False,,WARNING
+T013,L,T002,test,325,325,576,1,28832,0,28832,False,,WARNING
+T013,L,T003,test,325,325,576,18,2059,0,2059,False,,WARNING
+T013,L,T004,test,325,325,576,1,8613,0,8613,False,,WARNING
+T013,L,T005,test,325,325,576,3,0,0,2548,False,,WARNING
+T013,L,T006,test,325,325,576,10,0,0,12766,False,,WARNING
+T013,L,T007,test,325,325,576,0,40915,0,40915,True,output\remesh_r24\raw\T013_L\T007_remesh.ply,PASS
+T013,L,T008,test,325,325,576,21,0,0,2702,False,,WARNING
+T013,L,T009,test,325,325,576,131,179,0,179,False,,FAIL
+T013,L,T010,test,325,325,576,2,0,0,1808,False,,WARNING
+T013,L,T011,test,325,325,576,2,2981,0,2981,False,,WARNING
+T013,L,T012,test,325,325,576,2,0,0,2828,False,,WARNING
+T013,L,T013,test,325,325,576,0,0,0,6783,True,output\remesh_r24\raw\T013_L\T013_remesh.ply,PASS

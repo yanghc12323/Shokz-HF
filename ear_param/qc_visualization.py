@@ -14,7 +14,7 @@ import numpy as np
 import trimesh
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from .remesh import RegionRemeshResult, classify_remesh_qc_status
+from .remesh import RegionRemeshResult, RepairedSamples, classify_remesh_qc_status
 
 
 def classify_region_qc(sample_tag: str, result: RegionRemeshResult) -> dict[str, object]:
@@ -37,6 +37,39 @@ def classify_region_qc(sample_tag: str, result: RegionRemeshResult) -> dict[str,
         "patch_face_count": int(len(result.patch.face_ids)),
         "remesh_face_count": int(len(result.template.faces)),
         "status": status,
+    }
+
+
+def classify_repaired_region_qc(
+    sample_tag: str,
+    result: RegionRemeshResult,
+    repaired: RepairedSamples,
+) -> dict[str, object]:
+    """Return QC fields for repaired samples while preserving raw counts."""
+    n_samples = int(len(repaired.points_3d))
+    raw_unmapped = int(result.located_samples.unmapped_count)
+    repaired_unmapped = int(repaired.repaired_unmapped_count)
+    n_degenerate = int(result.parameterization.degenerate_face_count)
+
+    return {
+        "sample_tag": sample_tag,
+        "region_id": result.region_id,
+        "region_name": result.region_name,
+        "sample_point_count": n_samples,
+        "expected_point_count": int(len(result.template.barycentric)),
+        "unmapped_count": repaired_unmapped,
+        "unmapped_ratio": float(repaired_unmapped / max(n_samples, 1)),
+        "raw_unmapped_count": raw_unmapped,
+        "raw_unmapped_ratio": float(raw_unmapped / max(n_samples, 1)),
+        "raw_status": repaired.raw_status,
+        "repaired_unmapped_count": repaired_unmapped,
+        "repair_count": int(repaired.repaired_count),
+        "repair_applied": bool(repaired.repaired_count > 0),
+        "flipped_faces": int(result.parameterization.flipped_face_count),
+        "degenerate_faces": n_degenerate,
+        "patch_face_count": int(len(result.patch.face_ids)),
+        "remesh_face_count": int(len(result.template.faces)),
+        "status": repaired.status,
     }
 
 
@@ -63,6 +96,38 @@ def save_region_qc_figure(
         f"{result.region_id} | {record['status']} | "
         f"unmapped={record['unmapped_count']}/{record['sample_point_count']} | "
         f"patch_faces={record['patch_face_count']}",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def save_region_repaired_qc_figure(
+    mesh: trimesh.Trimesh,
+    result: RegionRemeshResult,
+    repaired: RepairedSamples,
+    out_path: str | Path,
+    *,
+    max_patch_faces: int = 5000,
+) -> Path:
+    """Save one PNG showing 3D patch/boundaries and repaired sample state."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(13, 6), dpi=150)
+    ax_3d = fig.add_subplot(1, 2, 1, projection="3d")
+    ax_uv = fig.add_subplot(1, 2, 2)
+
+    _plot_patch_3d(ax_3d, mesh, result, max_patch_faces=max_patch_faces)
+    _plot_uv_repaired_qc(ax_uv, result, repaired)
+
+    record = classify_repaired_region_qc("", result, repaired)
+    fig.suptitle(
+        f"{result.region_id} | raw={record['raw_status']} -> repaired={record['status']} | "
+        f"repairs={record['repair_count']} | "
+        f"unmapped={record['repaired_unmapped_count']}/{record['sample_point_count']}",
         fontsize=11,
     )
     fig.tight_layout()
@@ -143,6 +208,59 @@ def _plot_uv_qc(ax, result: RegionRemeshResult) -> None:
     ax.set_xlim(-0.05, 1.05)
     ax.set_ylim(-0.05, 1.05)
     ax.set_title("2D UV patch and template samples")
+    ax.set_xlabel("u")
+    ax.set_ylabel("v")
+    ax.legend(loc="upper right", fontsize=8)
+
+
+def _plot_uv_repaired_qc(
+    ax,
+    result: RegionRemeshResult,
+    repaired: RepairedSamples,
+) -> None:
+    uv = np.asarray(result.parameterization.uv, dtype=float)
+    faces = np.asarray(result.parameterization.local_faces, dtype=int)
+    if len(faces) > 0:
+        triangulation = mtri.Triangulation(uv[:, 0], uv[:, 1], faces)
+        ax.triplot(triangulation, color="#b0b0b0", linewidth=0.35, alpha=0.55)
+
+    sample_uv = np.asarray(result.template.uv, dtype=float)
+    raw_unmapped = np.asarray(result.located_samples.unmapped_mask, dtype=bool)
+    repaired_mask = np.asarray(repaired.repaired_mask, dtype=bool)
+    repaired_unmapped = ~np.isfinite(np.asarray(repaired.points_3d, dtype=float)).all(axis=1)
+    mapped = ~raw_unmapped
+    unrepaired = repaired_unmapped
+
+    if mapped.any():
+        ax.scatter(sample_uv[mapped, 0], sample_uv[mapped, 1], s=16, color="#1f77b4", label="raw mapped")
+    if repaired_mask.any():
+        ax.scatter(
+            sample_uv[repaired_mask, 0],
+            sample_uv[repaired_mask, 1],
+            s=42,
+            marker="^",
+            linewidths=0.8,
+            color="#f77f00",
+            edgecolors="black",
+            label="repaired",
+        )
+    if unrepaired.any():
+        ax.scatter(
+            sample_uv[unrepaired, 0],
+            sample_uv[unrepaired, 1],
+            s=46,
+            marker="x",
+            linewidths=1.6,
+            color="#d62828",
+            label="unrepaired",
+        )
+
+    triangle = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
+    ax.plot(triangle[:, 0], triangle[:, 1], color="black", linewidth=1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlim(-0.05, 1.05)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_title("2D repaired template samples")
     ax.set_xlabel("u")
     ax.set_ylabel("v")
     ax.legend(loc="upper right", fontsize=8)

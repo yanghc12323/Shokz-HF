@@ -5,7 +5,7 @@
 
 ## 1. 当前问题
 
-当前 `T013_L/T076_L/T077_L/T078_L` 在 13 个 region 上的 QC 可视化汇总为：
+历史 r8 `T013_L/T076_L/T077_L/T078_L` 在 13 个 region 上的 QC 可视化汇总为：
 
 ```text
 T013_L: PASS=2, WARNING=10, FAIL=1
@@ -16,45 +16,53 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 完全无 FAIL region: 12
 ```
 
-这说明当前还不能直接进入 W3 正式 PCA。W3 需要多个样本在同一个 region 上同时 `PASS`，否则该 region 的 PCA 输入矩阵会包含 NaN 或样本数不足。
+当前主线已经切换到 `resolution=24`。四样本 r24 结果为：
+
+```text
+raw:
+T013_L: PASS=2, WARNING=10, FAIL=1
+T076_L: PASS=2, WARNING=11, FAIL=0
+T077_L: PASS=3, WARNING=10, FAIL=0
+T078_L: PASS=3, WARNING=9,  FAIL=1
+
+repaired:
+T013_L: PASS=12, WARNING=0, FAIL=1
+T076_L: PASS=13, WARNING=0, FAIL=0
+T077_L: PASS=13, WARNING=0, FAIL=0
+T078_L: PASS=12, WARNING=0, FAIL=1
+```
+
+这说明 r24 主流程和 WARNING-only repair 已经能在四个真实样本上运行。W3 需要多个样本在同一个 region 上同时 `PASS`，否则该 region 的 PCA 输入矩阵会包含 NaN 或样本数不足。
 
 ## 2. 主要证据
 
-T078 是本轮最关键的问题样本。更新 PLY 后，结果较之前大幅改善，但仍未达到 W3 输入标准：
+T078 是当前最需要重点观察的样本。更新 PLY 后，raw 结果较之前大幅改善；repair 后大多数 WARNING 区域可导出 PLY：
 
 ```text
 T078_L / T001:
-patch_face_count = 7942
-unmapped_count = 2 / 45
-degenerate_faces = 0
-status = WARNING
+raw unmapped_count = 2 / 325
+raw status = WARNING
+repaired status = PASS
 
 T078_L / T002:
-patch_face_count = 24333
-unmapped_count = 0 / 45
-degenerate_faces = 0
-status = PASS
+raw status = PASS
 
-T078_L / T008:
-patch_face_count = 10428
-unmapped_count = 0 / 45
-degenerate_faces = 0
-status = PASS
+T078_L / T003:
+raw unmapped_count = 23 / 325
+raw status = WARNING
+repaired status = PASS
 
 T078_L / T009:
 patch_face_count = 195
-unmapped_count = 15 / 45
-degenerate_faces = 0
-status = FAIL
+raw unmapped_count = 96 / 325
+raw status = FAIL
+repaired status = FAIL
 
 T078_L / T010:
-patch_face_count = 18992
-unmapped_count = 0 / 45
-degenerate_faces = 0
-status = PASS
+raw status = PASS
 ```
 
-T078 的 landmark 与 mesh 坐标整体匹配，新 PLY 使大多数 region 脱离了完全退化状态。因此当前不再把 T078 视为整体异常样本；更合理的判断是：T009 仍存在局部区域覆盖不足，其它无 FAIL 区域需要继续微调以减少 unmapped 点。
+T078 的 landmark 与 mesh 坐标整体匹配，新 PLY 使大多数 region 脱离了完全退化状态。当前更合理的判断是：T009 仍存在局部区域覆盖不足，其它 raw WARNING 区域可以通过透明 repair 增加 PLY 导出数量。
 
 ## 3. 三样本参考结果
 
@@ -92,14 +100,25 @@ T010: PASS=1, WARNING=3, FAIL=0, total_unmapped=3
 `resolution` 控制标准三角域中的 template 点数：
 
 ```text
-resolution=8  -> 45 points
 resolution=12 -> 91 points
 resolution=16 -> 153 points
+resolution=24 -> 325 points
 ```
 
-如果当前 patch 没有覆盖完整标准三角域，提高 `resolution` 只会生成更多 template 点，通常会暴露更多 unmapped 点。它不能修复 patch 过窄、退化或边界路径错误。
+当前已经按 mentor 讨论结果切换到 `resolution=24`。如果 patch 没有覆盖完整标准三角域，提高 `resolution` 会暴露更多 unmapped 点，因此必须配套 raw/repaired 两层 QC。
 
-建议保持 `resolution=8`，先把 region 稳定性调好。
+当前策略是：r24 raw QC 用于判断原始映射质量；r24 repaired 输出用于尽可能导出完整 PLY。
+
+QC 可视化也保持 raw/repaired 两层：
+
+```text
+output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
+```
+
+raw 图用于看未修补前的真实问题；repaired 图用于确认补点是否消除了角点或局部 unmapped。repaired 图中的橙色三角表示已修补点，红色叉号表示仍未修补点。
 
 ## 6. 推荐处理顺序
 
@@ -131,7 +150,8 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L
 汇总文件：
 
 ```text
-output/qc_visualizations/qc_visualization_summary.csv
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 ```
 
 优先查看每个 region 在所有样本中的 PASS 数、FAIL 数和 unmapped 数。
@@ -141,10 +161,10 @@ output/qc_visualizations/qc_visualization_summary.csv
 T078 的优先诊断顺序：
 
 ```text
-1. 先看 output/qc_visualizations/T078_L/T002_qc.png
-2. 再看 output/qc_visualizations/T078_L/T008_qc.png
-3. 再看 output/qc_visualizations/T078_L/T009_qc.png
-4. 再看 output/qc_visualizations/T078_L/T010_qc.png
+1. 先看 output/qc_visualizations_r24/raw/T078_L/T002_qc.png 和 repaired/T078_L/T002_qc.png
+2. 再看 output/qc_visualizations_r24/raw/T078_L/T008_qc.png 和 repaired/T078_L/T008_qc.png
+3. 再看 output/qc_visualizations_r24/raw/T078_L/T009_qc.png 和 repaired/T078_L/T009_qc.png
+4. 再看 output/qc_visualizations_r24/raw/T078_L/T010_qc.png 和 repaired/T078_L/T010_qc.png
 ```
 
 原因：`T002/T008/T010` 已经在 T078 上 PASS，可作为优先候选；`T009` 是当前主要失败区域，需要单独分析边界和 patch 覆盖。

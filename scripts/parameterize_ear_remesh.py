@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Command-line entry for patch-based ear remesh.
 
@@ -29,6 +29,7 @@ from ear_param.remesh import (
     build_region_remesh_mesh,
     classify_remesh_qc_status,
     compute_region_feature_values,
+    repair_unmapped_samples,
 )
 
 
@@ -64,13 +65,23 @@ Example:
     )
     parser.add_argument(
         "--out_dir",
-        default="output/parameterized_points",
-        help="Output directory for points/faces/features/QC CSV files.",
+        default="output/parameterized_points_r24/raw",
+        help="Output directory for raw points/faces/features/QC CSV files.",
     )
     parser.add_argument(
         "--mesh_out_dir",
-        default="output/remesh",
-        help="Output directory for remesh PLY files.",
+        default="output/remesh_r24/raw",
+        help="Output directory for raw PASS remesh PLY files.",
+    )
+    parser.add_argument(
+        "--repaired_out_dir",
+        default="output/parameterized_points_r24/repaired",
+        help="Output directory for repaired points/faces/QC CSV files.",
+    )
+    parser.add_argument(
+        "--repaired_mesh_out_dir",
+        default="output/remesh_r24/repaired",
+        help="Output directory for repaired/exportable remesh PLY files.",
     )
 
     args = parser.parse_args()
@@ -109,15 +120,21 @@ Example:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    repaired_out_dir = Path(args.repaired_out_dir)
+    repaired_out_dir.mkdir(parents=True, exist_ok=True)
 
     sample_tag = f"{args.sample_id}_{args.side}"
     all_points: list[pd.DataFrame] = []
+    all_repaired_points: list[pd.DataFrame] = []
     all_faces: list[pd.DataFrame] = []
     feature_records: list[dict] = []
     qc_records: list[dict] = []
+    repaired_qc_records: list[dict] = []
     global_point_id = 0
     mesh_out_dir = Path(args.mesh_out_dir) / sample_tag
     mesh_out_dir.mkdir(parents=True, exist_ok=True)
+    repaired_mesh_out_dir = Path(args.repaired_mesh_out_dir) / sample_tag
+    repaired_mesh_out_dir.mkdir(parents=True, exist_ok=True)
 
     for _, row in regions.iterrows():
         region = row.to_dict()
@@ -161,6 +178,21 @@ Example:
             all_points.append(df_region)
             global_point_id += n_samples
 
+            repaired = repair_unmapped_samples(result)
+            repaired_is_unmapped = ~pd.notna(repaired.points_3d).all(axis=1)
+            df_repaired_region = df_region.copy()
+            df_repaired_region["raw_x"] = df_region["x"]
+            df_repaired_region["raw_y"] = df_region["y"]
+            df_repaired_region["raw_z"] = df_region["z"]
+            df_repaired_region["raw_is_unmapped"] = df_region["is_unmapped"]
+            df_repaired_region["x"] = repaired.points_3d[:, 0]
+            df_repaired_region["y"] = repaired.points_3d[:, 1]
+            df_repaired_region["z"] = repaired.points_3d[:, 2]
+            df_repaired_region["is_unmapped"] = repaired_is_unmapped
+            df_repaired_region["is_repaired"] = repaired.repaired_mask
+            df_repaired_region["repair_method"] = repaired.repair_methods
+            all_repaired_points.append(df_repaired_region)
+
             all_faces.append(pd.DataFrame({
                 "sample_id": args.sample_id,
                 "side": args.side,
@@ -198,6 +230,15 @@ Example:
                 build_region_remesh_mesh(result).export(mesh_path)
                 mesh_exported = True
 
+            repaired_mesh_path = repaired_mesh_out_dir / f"{rid}_remesh_repaired.ply"
+            repaired_mesh_exported = False
+            if repaired.exportable:
+                build_region_remesh_mesh(
+                    result,
+                    vertices_override=repaired.points_3d,
+                ).export(repaired_mesh_path)
+                repaired_mesh_exported = True
+
             qc_records.append({
                 "sample_id": args.sample_id,
                 "side": args.side,
@@ -214,12 +255,33 @@ Example:
                 "mesh_path": str(mesh_path) if mesh_exported else "",
                 "status": status,
             })
+            repaired_qc_records.append({
+                "sample_id": args.sample_id,
+                "side": args.side,
+                "region_id": rid,
+                "region_name": rname,
+                "sample_point_count": n_samples,
+                "expected_point_count": n_expected,
+                "remesh_face_count": n_remesh_faces,
+                "raw_unmapped_count": n_unmapped,
+                "raw_status": status,
+                "repaired_unmapped_count": repaired.repaired_unmapped_count,
+                "repair_count": repaired.repaired_count,
+                "repair_applied": repaired.repaired_count > 0,
+                "flipped_faces": n_flipped,
+                "degenerate_faces": n_degenerate,
+                "patch_face_count": patch_face_count,
+                "mesh_exported": repaired_mesh_exported,
+                "mesh_path": str(repaired_mesh_path) if repaired_mesh_exported else "",
+                "status": repaired.status,
+            })
 
             print(
                 f"  -> points={n_samples} (expected {n_expected}), "
                 f"unmapped={n_unmapped}, flipped={n_flipped}, "
                 f"degenerate={n_degenerate}, patch_faces={patch_face_count}, "
-                f"remesh_faces={n_remesh_faces}, status={status}"
+                f"remesh_faces={n_remesh_faces}, raw_status={status}, "
+                f"repaired_status={repaired.status}, repairs={repaired.repaired_count}"
             )
 
         except Exception as exc:
@@ -240,6 +302,26 @@ Example:
                 "mesh_path": "",
                 "status": "FAIL",
             })
+            repaired_qc_records.append({
+                "sample_id": args.sample_id,
+                "side": args.side,
+                "region_id": rid,
+                "region_name": rname,
+                "sample_point_count": 0,
+                "expected_point_count": 0,
+                "remesh_face_count": 0,
+                "raw_unmapped_count": 0,
+                "raw_status": "FAIL",
+                "repaired_unmapped_count": 0,
+                "repair_count": 0,
+                "repair_applied": False,
+                "flipped_faces": 0,
+                "degenerate_faces": 0,
+                "patch_face_count": 0,
+                "mesh_exported": False,
+                "mesh_path": "",
+                "status": "FAIL",
+            })
 
     if all_points:
         df_all = pd.concat(all_points, ignore_index=True)
@@ -252,8 +334,17 @@ Example:
 
     if all_faces:
         faces_path = out_dir / f"{sample_tag}_remesh_faces.csv"
-        pd.concat(all_faces, ignore_index=True).to_csv(faces_path, index=False)
+        faces_df = pd.concat(all_faces, ignore_index=True)
+        faces_df.to_csv(faces_path, index=False)
         print(f"[Remesh] Faces saved: {faces_path}")
+        repaired_faces_path = repaired_out_dir / f"{sample_tag}_remesh_faces.csv"
+        faces_df.to_csv(repaired_faces_path, index=False)
+        print(f"[Remesh] Repaired faces saved: {repaired_faces_path}")
+
+    if all_repaired_points:
+        repaired_points_path = repaired_out_dir / f"{sample_tag}_remesh_points.csv"
+        pd.concat(all_repaired_points, ignore_index=True).to_csv(repaired_points_path, index=False)
+        print(f"[Remesh] Repaired points saved: {repaired_points_path}")
 
     if feature_records:
         features_path = out_dir / f"{sample_tag}_region_features.csv"
@@ -263,12 +354,23 @@ Example:
     qc_path = out_dir / f"{sample_tag}_remesh_qc.csv"
     pd.DataFrame(qc_records).to_csv(qc_path, index=False)
     print(f"[Remesh] QC saved: {qc_path}")
+    repaired_qc_path = repaired_out_dir / f"{sample_tag}_remesh_qc.csv"
+    pd.DataFrame(repaired_qc_records).to_csv(repaired_qc_path, index=False)
+    print(f"[Remesh] Repaired QC saved: {repaired_qc_path}")
 
     qc_df = pd.DataFrame(qc_records)
     pass_c = int((qc_df["status"] == "PASS").sum())
     warn_c = int((qc_df["status"] == "WARNING").sum())
     fail_c = int((qc_df["status"] == "FAIL").sum())
     print(f"\n[Remesh] Done: PASS={pass_c} WARNING={warn_c} FAIL={fail_c}")
+    repaired_qc_df = pd.DataFrame(repaired_qc_records)
+    repaired_pass_c = int((repaired_qc_df["status"] == "PASS").sum())
+    repaired_warn_c = int((repaired_qc_df["status"] == "WARNING").sum())
+    repaired_fail_c = int((repaired_qc_df["status"] == "FAIL").sum())
+    print(
+        "[Remesh] Repaired Done: "
+        f"PASS={repaired_pass_c} WARNING={repaired_warn_c} FAIL={repaired_fail_c}"
+    )
 
 
 if __name__ == "__main__":

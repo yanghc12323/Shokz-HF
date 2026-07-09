@@ -3,7 +3,7 @@
 > 汇报对象：项目 mentor  
 > 汇报日期：2026-07-09  
 > 当前阶段：W2，围绕真实耳朵三维数据进行区域划分、二维展开、统一采样和质量检查  
-> 当前结论：W2 主流程已经实现并可在真实数据上批量运行；更新 T078 PLY 后结果显著改善，但四样本仍暂无共同通过区域，下一步应继续优化区域划分表。
+> 当前结论：W2 主流程已经实现并可在真实数据上批量运行；主线已切换到 resolution=24，并引入 raw/repaired 两层输出。
 
 ## 1. 本周任务要求
 
@@ -65,7 +65,7 @@ mentor 给出的 W2 任务可以拆成五件事：
 2. 13 个三角区域的区域划分表。
 3. 三维局部区域提取。
 4. 三维区域展开到二维标准三角形。
-5. 每个区域固定 45 个采样点、64 个标准三角面。
+5. 每个区域固定 325 个采样点、576 个标准三角面。
 6. 二维采样点映射回三维耳朵表面。
 7. 根据三个特征点计算边长、周长、面积、角度、质心、法向等特征值。
 8. 输出每个区域的质量检查表和可视化检查图。
@@ -73,10 +73,13 @@ mentor 给出的 W2 任务可以拆成五件事：
 对应输出包括：
 
 ```text
-output/parameterized_points/<样本>_L_remesh_points.csv
-output/parameterized_points/<样本>_L_remesh_faces.csv
-output/parameterized_points/<样本>_L_region_features.csv
-output/parameterized_points/<样本>_L_remesh_qc.csv
+output/parameterized_points_r24/raw/<样本>_L_remesh_points.csv
+output/parameterized_points_r24/raw/<样本>_L_remesh_faces.csv
+output/parameterized_points_r24/raw/<样本>_L_region_features.csv
+output/parameterized_points_r24/raw/<样本>_L_remesh_qc.csv
+output/parameterized_points_r24/repaired/<样本>_L_remesh_points.csv
+output/parameterized_points_r24/repaired/<样本>_L_remesh_faces.csv
+output/parameterized_points_r24/repaired/<样本>_L_remesh_qc.csv
 output/qc_visualizations/<样本>_L/<区域编号>_qc.png
 ```
 
@@ -108,8 +111,11 @@ T078 所需的 14 个特征点全部存在
 重跑后，T078 结果显著改善：
 
 ```text
-普通 remesh 主流程与 QC 可视化汇总一致：
+resolution=24 raw:
 T078_L: PASS=3, WARNING=9, FAIL=1
+
+resolution=24 repaired:
+T078_L: PASS=12, WARNING=0, FAIL=1
 ```
 
 改善最明显的是：
@@ -161,12 +167,13 @@ T009 是当前主要失败区域。
 
 当前问题集中在区域划分的稳定性上，尤其是 T009。
 
-T009 仍表现为：
+T009 在 r24 下仍表现为：
 
 ```text
 patch_face_count = 195
-unmapped_count = 15 / 45
-status = FAIL
+raw unmapped_count = 96 / 325
+raw status = FAIL
+repaired status = FAIL
 ```
 
 更可能的原因包括：
@@ -200,7 +207,7 @@ status = FAIL
 | 参考论文明确耳朵模型需求形态 | 已采用统一点数、统一点序、统一面片结构的局部重建表达 |
 | 明确划分选区的特征点 | 已通过 `region_table.csv` 定义 13 个三角区域 |
 | 将三维三角区域投影至二维平面 | 已实现每个局部区域展开到统一二维标准三角形 |
-| 进行降采样处理 | 已实现每个区域固定 45 个采样点 |
+| 进行降采样处理 | 已实现每个区域固定 325 个采样点 |
 | 限定每一区域采样点数量相同 | 已实现所有区域固定点数和固定点序 |
 | 根据特征点计算相关特征值 | 已输出边长、面积、角度、质心、法向等特征 |
 | 在真实数据上验证 | 已完成 4 个真实样本批量运行 |

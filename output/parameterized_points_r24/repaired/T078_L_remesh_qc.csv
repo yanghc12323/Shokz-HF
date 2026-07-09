@@ -1,0 +1,14 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,raw_unmapped_count,raw_status,repaired_unmapped_count,repair_count,repair_applied,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T078,L,T001,test,325,325,576,2,WARNING,0,2,True,0,0,7942,True,output\remesh_r24\repaired\T078_L\T001_remesh_repaired.ply,PASS
+T078,L,T002,test,325,325,576,0,PASS,0,0,False,24333,0,24333,True,output\remesh_r24\repaired\T078_L\T002_remesh_repaired.ply,PASS
+T078,L,T003,test,325,325,576,23,WARNING,0,23,True,2060,0,2060,True,output\remesh_r24\repaired\T078_L\T003_remesh_repaired.ply,PASS
+T078,L,T004,test,325,325,576,2,WARNING,0,2,True,20922,0,20922,True,output\remesh_r24\repaired\T078_L\T004_remesh_repaired.ply,PASS
+T078,L,T005,test,325,325,576,2,WARNING,0,2,True,0,0,6198,True,output\remesh_r24\repaired\T078_L\T005_remesh_repaired.ply,PASS
+T078,L,T006,test,325,325,576,3,WARNING,0,3,True,0,0,11036,True,output\remesh_r24\repaired\T078_L\T006_remesh_repaired.ply,PASS
+T078,L,T007,test,325,325,576,5,WARNING,0,5,True,6277,0,6277,True,output\remesh_r24\repaired\T078_L\T007_remesh_repaired.ply,PASS
+T078,L,T008,test,325,325,576,0,PASS,0,0,False,0,0,10428,True,output\remesh_r24\repaired\T078_L\T008_remesh_repaired.ply,PASS
+T078,L,T009,test,325,325,576,96,FAIL,96,0,False,0,0,195,False,,FAIL
+T078,L,T010,test,325,325,576,0,PASS,0,0,False,0,0,18992,True,output\remesh_r24\repaired\T078_L\T010_remesh_repaired.ply,PASS
+T078,L,T011,test,325,325,576,1,WARNING,0,1,True,5411,0,5411,True,output\remesh_r24\repaired\T078_L\T011_remesh_repaired.ply,PASS
+T078,L,T012,test,325,325,576,9,WARNING,0,9,True,0,0,1545,True,output\remesh_r24\repaired\T078_L\T012_remesh_repaired.ply,PASS
+T078,L,T013,test,325,325,576,1,WARNING,0,1,True,0,0,3365,True,output\remesh_r24\repaired\T078_L\T013_remesh_repaired.ply,PASS

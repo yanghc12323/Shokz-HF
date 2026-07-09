@@ -25,10 +25,12 @@ script_output.txt
 # Project-specific: generated output (kept locally, not in repo)
 output/logs/
 output/figures/
+*.ply
 
 # Project-specific: reference documents and binaries
 *.pdf
 *.docx
+
 3.7.0
 
 # Test cache

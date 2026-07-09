@@ -14,8 +14,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
-from ear_param.qc_visualization import classify_region_qc, save_region_qc_figure
-from ear_param.remesh import build_region_remesh
+from ear_param.qc_visualization import (
+    classify_region_qc,
+    classify_repaired_region_qc,
+    save_region_qc_figure,
+    save_region_repaired_qc_figure,
+)
+from ear_param.remesh import build_region_remesh, repair_unmapped_samples
 
 
 def main() -> None:
@@ -34,13 +39,16 @@ Example:
     parser.add_argument("--region_ids", nargs="+", help="Optional subset of region IDs.")
     parser.add_argument("--data_dir", default="data", help="Input data directory.")
     parser.add_argument("--regions", default="config/region_table.csv", help="Region table CSV path.")
-    parser.add_argument("--out_dir", default="output/qc_visualizations", help="Output directory.")
+    parser.add_argument("--out_dir", default="output/qc_visualizations_r24", help="Output root directory.")
     parser.add_argument("--max_patch_faces", type=int, default=5000, help="Max patch faces drawn per 3D figure.")
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_out_dir = out_dir / "raw"
+    repaired_out_dir = out_dir / "repaired"
+    raw_out_dir.mkdir(parents=True, exist_ok=True)
+    repaired_out_dir.mkdir(parents=True, exist_ok=True)
 
     sample_tags = args.samples if args.samples else _discover_sample_tags(data_dir)
     if not sample_tags:
@@ -53,7 +61,8 @@ Example:
     if regions.empty:
         raise SystemExit("No regions selected.")
 
-    summary_records: list[dict[str, object]] = []
+    raw_summary_records: list[dict[str, object]] = []
+    repaired_summary_records: list[dict[str, object]] = []
     for sample_tag in sample_tags:
         sample_id, side = _split_sample_tag(sample_tag)
         mesh_path = data_dir / "clean_mesh" / f"{sample_tag}.ply"
@@ -66,24 +75,41 @@ Example:
             region = row.to_dict()
             region_id = str(region["region_id"])
             print(f"[QC] {sample_tag} {region_id}")
-            figure_path = out_dir / sample_tag / f"{region_id}_qc.png"
+            raw_figure_path = raw_out_dir / sample_tag / f"{region_id}_qc.png"
+            repaired_figure_path = repaired_out_dir / sample_tag / f"{region_id}_qc.png"
             try:
                 result = build_region_remesh(mesh, landmarks, region)
-                record = classify_region_qc(sample_tag, result)
-                record.update({
+                raw_record = classify_region_qc(sample_tag, result)
+                raw_record.update({
                     "sample_id": sample_id,
                     "side": side,
-                    "figure_path": str(figure_path),
+                    "figure_path": str(raw_figure_path),
                     "error": "",
                 })
                 save_region_qc_figure(
                     mesh,
                     result,
-                    figure_path,
+                    raw_figure_path,
+                    max_patch_faces=args.max_patch_faces,
+                )
+
+                repaired = repair_unmapped_samples(result)
+                repaired_record = classify_repaired_region_qc(sample_tag, result, repaired)
+                repaired_record.update({
+                    "sample_id": sample_id,
+                    "side": side,
+                    "figure_path": str(repaired_figure_path),
+                    "error": "",
+                })
+                save_region_repaired_qc_figure(
+                    mesh,
+                    result,
+                    repaired,
+                    repaired_figure_path,
                     max_patch_faces=args.max_patch_faces,
                 )
             except Exception as exc:
-                record = {
+                raw_record = {
                     "sample_tag": sample_tag,
                     "sample_id": sample_id,
                     "side": side,
@@ -101,14 +127,29 @@ Example:
                     "figure_path": "",
                     "error": str(exc),
                 }
+                repaired_record = dict(raw_record)
+                repaired_record.update({
+                    "raw_unmapped_count": 0,
+                    "raw_unmapped_ratio": 0.0,
+                    "raw_status": "ERROR",
+                    "repaired_unmapped_count": 0,
+                    "repair_count": 0,
+                    "repair_applied": False,
+                })
                 print(f"  [ERROR] {exc}")
-            summary_records.append(record)
+            raw_summary_records.append(raw_record)
+            repaired_summary_records.append(repaired_record)
 
-    summary = pd.DataFrame(summary_records)
-    summary_path = out_dir / "qc_visualization_summary.csv"
-    summary.to_csv(summary_path, index=False)
-    print(f"[QC] Summary saved: {summary_path}")
-    print(pd.crosstab(summary["sample_tag"], summary["status"]).to_string())
+    raw_summary = pd.DataFrame(raw_summary_records)
+    repaired_summary = pd.DataFrame(repaired_summary_records)
+    raw_summary_path = raw_out_dir / "qc_visualization_summary.csv"
+    repaired_summary_path = repaired_out_dir / "qc_visualization_summary.csv"
+    raw_summary.to_csv(raw_summary_path, index=False)
+    repaired_summary.to_csv(repaired_summary_path, index=False)
+    print(f"[QC] Raw summary saved: {raw_summary_path}")
+    print(pd.crosstab(raw_summary["sample_tag"], raw_summary["status"]).to_string())
+    print(f"[QC] Repaired summary saved: {repaired_summary_path}")
+    print(pd.crosstab(repaired_summary["sample_tag"], repaired_summary["status"]).to_string())
 
 
 def _discover_sample_tags(data_dir: Path) -> list[str]:
