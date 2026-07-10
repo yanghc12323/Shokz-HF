@@ -1,7 +1,7 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
 > 适用阶段：W2 真实样本 remesh、QC 与 region table 优化  
-> 更新时间：2026-07-09  
+> 更新时间：2026-07-10  
 > 主入口：`scripts/parameterize_ear_remesh.py`  
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
@@ -42,6 +42,8 @@ region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
 sample_point_count = 325
 remesh_face_count = 576
 ```
+
+最新 `region_table.csv` 已将 T009 的特征点组合调整为 `L18-L29-L30`，用于解决旧版 T009 在 r24 下持续 FAIL 的问题。
 
 ## 3. VSCode 命令行运行方式
 
@@ -149,31 +151,34 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 
 ```text
 raw:
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1
+T013_L: PASS=2, WARNING=11, FAIL=0
+T076_L: PASS=1, WARNING=11, FAIL=1
+T077_L: PASS=1, WARNING=12, FAIL=0
+T078_L: PASS=2, WARNING=11, FAIL=0
 
 repaired:
-T013_L: PASS=12, WARNING=0, FAIL=1
-T076_L: PASS=13, WARNING=0, FAIL=0
+T013_L: PASS=13, WARNING=0, FAIL=0
+T076_L: PASS=12, WARNING=0, FAIL=1
 T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=12, WARNING=0, FAIL=1
+T078_L: PASS=13, WARNING=0, FAIL=0
 ```
 
 注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING，不处理 raw FAIL。
 
-T078 的关键异常：
+关键变化：
 
 ```text
-T001: raw unmapped=2/325, repaired PASS
-T002: raw PASS
-T003: raw unmapped=23/325, repaired PASS
-T009: raw unmapped=96/325, raw FAIL, repaired FAIL
-T010: raw PASS
+T009 新组合 L18-L29-L30:
+T013_L raw unmapped=1/325,  repaired PASS
+T076_L raw unmapped=4/325,  repaired PASS
+T077_L raw unmapped=51/325, repaired PASS
+T078_L raw unmapped=6/325,  repaired PASS
+
+当前剩余 FAIL:
+T076_L / T008: raw unmapped=113/325, repaired FAIL
 ```
 
-r24 repaired 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐，但 T009 这类 raw FAIL 仍保持失败。
+r24 repaired 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐。当前 T009 已不再是 FAIL 区域；下一步应重点诊断 `T076_L / T008`。
 
 ## 7. QC 判定规则
 

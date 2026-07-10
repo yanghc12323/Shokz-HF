@@ -1,6 +1,6 @@
 ﻿# Remesh QC 可视化与 Region Table 优化策略
 
-> 更新时间：2026-07-09  
+> 更新时间：2026-07-10  
 > 适用范围：W2 真实样本 QC、region table 诊断、W3 前置筛选
 
 ## 1. 当前问题
@@ -16,68 +16,74 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 完全无 FAIL region: 12
 ```
 
-当前主线已经切换到 `resolution=24`。四样本 r24 结果为：
+当前主线已经切换到 `resolution=24`，并且 `region_table.csv` 已将 T009 调整为 `L18-L29-L30`。最新四样本 r24 结果为：
 
 ```text
 raw:
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1
+T013_L: PASS=2, WARNING=11, FAIL=0
+T076_L: PASS=1, WARNING=11, FAIL=1
+T077_L: PASS=1, WARNING=12, FAIL=0
+T078_L: PASS=2, WARNING=11, FAIL=0
 
 repaired:
-T013_L: PASS=12, WARNING=0, FAIL=1
-T076_L: PASS=13, WARNING=0, FAIL=0
+T013_L: PASS=13, WARNING=0, FAIL=0
+T076_L: PASS=12, WARNING=0, FAIL=1
 T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=12, WARNING=0, FAIL=1
+T078_L: PASS=13, WARNING=0, FAIL=0
 ```
 
 这说明 r24 主流程和 WARNING-only repair 已经能在四个真实样本上运行。W3 需要多个样本在同一个 region 上同时 `PASS`，否则该 region 的 PCA 输入矩阵会包含 NaN 或样本数不足。
 
 ## 2. 主要证据
 
-T078 是当前最需要重点观察的样本。更新 PLY 后，raw 结果较之前大幅改善；repair 后大多数 WARNING 区域可导出 PLY：
+T009 是本轮 region table 更新的重点。旧版 T009 使用 `L28-L29-L30` 时在 T078 上出现 raw FAIL；新版改为 `L18-L29-L30` 后，四样本 T009 均不再 FAIL：
 
 ```text
-T078_L / T001:
-raw unmapped_count = 2 / 325
+T013_L / T009:
+raw unmapped_count = 1 / 325
 raw status = WARNING
 repaired status = PASS
 
-T078_L / T002:
-raw status = PASS
+T076_L / T009:
+raw unmapped_count = 4 / 325
+raw status = WARNING
+repaired status = PASS
 
-T078_L / T003:
-raw unmapped_count = 23 / 325
+T077_L / T009:
+raw unmapped_count = 51 / 325
 raw status = WARNING
 repaired status = PASS
 
 T078_L / T009:
-patch_face_count = 195
-raw unmapped_count = 96 / 325
-raw status = FAIL
-repaired status = FAIL
-
-T078_L / T010:
-raw status = PASS
+raw unmapped_count = 6 / 325
+raw status = WARNING
+repaired status = PASS
 ```
 
-T078 的 landmark 与 mesh 坐标整体匹配，新 PLY 使大多数 region 脱离了完全退化状态。当前更合理的判断是：T009 仍存在局部区域覆盖不足，其它 raw WARNING 区域可以通过透明 repair 增加 PLY 导出数量。
+这说明 T009 的新版特征点组合有效解决了持续 FAIL 问题。但 `T077_L / T009` 仍有 51 个 raw unmapped 点，说明它虽然可被 repaired 层补齐并导出 PLY，但是否适合进入 W3 PCA 仍需要后续明确策略。
+
+当前唯一剩余 FAIL 是：
+
+```text
+T076_L / T008:
+patch_face_count = 1323
+raw unmapped_count = 113 / 325
+raw status = FAIL
+repaired status = FAIL
+```
+
+因此下一轮 region table 诊断重点应从 T009 转移到 `T076_L / T008`。
 
 ## 3. 三样本参考结果
 
 如果暂时排除 T078，只看 `T013_L/T076_L/T077_L`，多数 region 至少可以完成可检查输出：
 
 ```text
-四样本无 FAIL region:
-T001, T002, T003, T004, T005, T006, T007, T008, T010, T011, T012, T013
+当前 raw 无 FAIL region:
+T001, T002, T003, T004, T005, T006, T007, T009, T010, T011, T012, T013
 
-四样本表现较好的候选:
-T002: PASS=2, WARNING=2, FAIL=0, total_unmapped=2
-T007: PASS=2, WARNING=2, FAIL=0, total_unmapped=5
-T008: PASS=2, WARNING=2, FAIL=0, total_unmapped=7
-T004: PASS=1, WARNING=3, FAIL=0, total_unmapped=3
-T010: PASS=1, WARNING=3, FAIL=0, total_unmapped=3
+当前仍有 FAIL 的 region:
+T008，仅出现在 T076_L
 ```
 
 这些结果说明 remesh 主流程本身是可工作的，但 region table 仍需要被更多样本挑战。
@@ -158,16 +164,15 @@ output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 
 ## 8. T1：调整 Region Table
 
-T078 的优先诊断顺序：
+当前优先诊断顺序：
 
 ```text
-1. 先看 output/qc_visualizations_r24/raw/T078_L/T002_qc.png 和 repaired/T078_L/T002_qc.png
-2. 再看 output/qc_visualizations_r24/raw/T078_L/T008_qc.png 和 repaired/T078_L/T008_qc.png
-3. 再看 output/qc_visualizations_r24/raw/T078_L/T009_qc.png 和 repaired/T078_L/T009_qc.png
-4. 再看 output/qc_visualizations_r24/raw/T078_L/T010_qc.png 和 repaired/T078_L/T010_qc.png
+1. 先看 output/qc_visualizations_r24/raw/T076_L/T008_qc.png 和 repaired/T076_L/T008_qc.png
+2. 再看 output/qc_visualizations_r24/raw/T077_L/T009_qc.png 和 repaired/T077_L/T009_qc.png
+3. 对比四个样本的 T009 repaired 图，确认新版 T009 是否形态连续、无明显插值异常
 ```
 
-原因：`T002/T008/T010` 已经在 T078 上 PASS，可作为优先候选；`T009` 是当前主要失败区域，需要单独分析边界和 patch 覆盖。
+原因：T009 已从 FAIL 改善为 WARNING/PASS；当前唯一真正失败的是 `T076_L / T008`。T009 后续重点不是“是否能跑通”，而是“repaired 后是否足够可信用于 W3”。
 
 调整方向：
 
@@ -180,7 +185,7 @@ T078 的优先诊断顺序：
 重点 region 的快速诊断命令：
 
 ```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T002 T008 T009 T010
+python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T008 T009
 ```
 
 ## 9. T2：参数或算法策略调整

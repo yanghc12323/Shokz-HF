@@ -1,7 +1,7 @@
 ﻿# W3 PCA 平均耳技术路线说明
 
 > 面向对象：后续接手本项目的 AI 或工程师  
-> 更新时间：2026-07-09  
+> 更新时间：2026-07-10  
 > 上游输入：W2 patch-based remesh 合格输出  
 > 当前状态：W3 尚未正式实现；W2 主线已切换到 resolution=24，并引入 raw/repaired 两层输出
 
@@ -32,25 +32,25 @@ T078_L: PASS=3, WARNING=9,  FAIL=1
 共同 PASS region: 0
 ```
 
-因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。更新 T078 PLY 后，四样本无 FAIL region 已增加到 12 个，但当前四样本仍没有共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
+因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。更新 T009 region table 后，T009 已不再 FAIL，但 raw 层仍没有四样本共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
 
 当前 r24 已在四个真实样本上完成验证：
 
 ```text
 raw:
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1
+T013_L: PASS=2, WARNING=11, FAIL=0
+T076_L: PASS=1, WARNING=11, FAIL=1
+T077_L: PASS=1, WARNING=12, FAIL=0
+T078_L: PASS=2, WARNING=11, FAIL=0
 
 repaired:
-T013_L: PASS=12, WARNING=0, FAIL=1
-T076_L: PASS=13, WARNING=0, FAIL=0
+T013_L: PASS=13, WARNING=0, FAIL=0
+T076_L: PASS=12, WARNING=0, FAIL=1
 T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=12, WARNING=0, FAIL=1
+T078_L: PASS=13, WARNING=0, FAIL=0
 ```
 
-r24 repaired 输出适合用于补齐 PLY 可视化；是否进入 W3 PCA，需要后续明确采用 raw PASS-only 还是 repaired exportable 数据。默认更保守的 W3 方案仍使用 raw PASS-only。
+r24 repaired 输出适合用于补齐 PLY 可视化。T009 新组合 `L18-L29-L30` 已在四样本 repaired 层全部 PASS；当前唯一剩余 FAIL 是 `T076_L / T008`。是否进入 W3 PCA，需要后续明确采用 raw PASS-only 还是 repaired exportable 数据。默认更保守的 W3 方案仍使用 raw PASS-only。
 
 当前正确顺序是：
 

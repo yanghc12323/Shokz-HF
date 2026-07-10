@@ -1,7 +1,7 @@
 # W2 当前进展汇报文档
 
 > 汇报对象：项目 mentor  
-> 汇报日期：2026-07-09  
+> 汇报日期：2026-07-10  
 > 当前阶段：W2，围绕真实耳朵三维数据进行区域划分、二维展开、统一采样和质量检查  
 > 当前结论：W2 主流程已经实现并可在真实数据上批量运行；主线已切换到 resolution=24，并引入 raw/repaired 两层输出。
 
@@ -80,7 +80,8 @@ output/parameterized_points_r24/raw/<样本>_L_remesh_qc.csv
 output/parameterized_points_r24/repaired/<样本>_L_remesh_points.csv
 output/parameterized_points_r24/repaired/<样本>_L_remesh_faces.csv
 output/parameterized_points_r24/repaired/<样本>_L_remesh_qc.csv
-output/qc_visualizations/<样本>_L/<区域编号>_qc.png
+output/qc_visualizations_r24/raw/<样本>_L/<区域编号>_qc.png
+output/qc_visualizations_r24/repaired/<样本>_L/<区域编号>_qc.png
 ```
 
 ## 5. 当前真实数据测试情况
@@ -98,7 +99,7 @@ T078_L
 
 这说明代码主流程能够处理真实数据，而不是只停留在模拟数据或单样本验证。
 
-## 6. 更新 T078 PLY 后的结果
+## 6. 更新 T078 PLY 与 T009 Region 后的结果
 
 此前 T078 大量区域完全退化，后续同事更新了 T078 landmark 表和 PLY。我们重新检查后确认：
 
@@ -108,25 +109,32 @@ T078 所需的 14 个特征点全部存在
 特征点到 mesh 的最近距离处于正常范围
 ```
 
-重跑后，T078 结果显著改善：
+重跑后，T078 结果显著改善；随后同事又更新了 T009 的 region 定义，将 T009 从旧版 `L28-L29-L30` 调整为新版 `L18-L29-L30`。最新四样本结果如下：
 
 ```text
 resolution=24 raw:
-T078_L: PASS=3, WARNING=9, FAIL=1
+T013_L: PASS=2, WARNING=11, FAIL=0
+T076_L: PASS=1, WARNING=11, FAIL=1
+T077_L: PASS=1, WARNING=12, FAIL=0
+T078_L: PASS=2, WARNING=11, FAIL=0
 
 resolution=24 repaired:
-T078_L: PASS=12, WARNING=0, FAIL=1
+T013_L: PASS=13, WARNING=0, FAIL=0
+T076_L: PASS=12, WARNING=0, FAIL=1
+T077_L: PASS=13, WARNING=0, FAIL=0
+T078_L: PASS=13, WARNING=0, FAIL=0
 ```
 
-改善最明显的是：
+T009 的改善最明显：
 
 ```text
-T002: patch_face_count=24333, unmapped_count=0, degenerate_faces=0, status=PASS
-T008: patch_face_count=10428, unmapped_count=0, degenerate_faces=0, status=PASS
-T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
+T013_L / T009: raw unmapped=1/325,  repaired PASS
+T076_L / T009: raw unmapped=4/325,  repaired PASS
+T077_L / T009: raw unmapped=51/325, repaired PASS
+T078_L / T009: raw unmapped=6/325,  repaired PASS
 ```
 
-这说明数据修正确实有效：T078 不再是整体异常样本。但四样本仍没有共同 PASS 区域，说明当前还需要继续优化 region table，让多个样本在同一区域上同时通过。
+这说明 T009 的新版特征点组合有效解决了持续 FAIL 问题。但四样本 raw 层仍没有共同 PASS 区域，说明当前还需要继续优化 region table，或者明确 repaired 输出是否可以作为 W3 的候选输入。
 
 ## 7. 当前四样本质量检查结果
 
@@ -134,17 +142,17 @@ T010: patch_face_count=18992, unmapped_count=0, degenerate_faces=0, status=PASS
 
 | 样本 | 通过区域 | 警告区域 | 失败区域 |
 |---|---:|---:|---:|
-| T013_L | 2 | 10 | 1 |
-| T076_L | 2 | 11 | 0 |
-| T077_L | 3 | 10 | 0 |
-| T078_L | 3 | 9 | 1 |
+| T013_L | 2 | 11 | 0 |
+| T076_L | 1 | 11 | 1 |
+| T077_L | 1 | 12 | 0 |
+| T078_L | 2 | 11 | 0 |
 
 当前最重要的结论是：
 
 ```text
 四个样本目前没有共同通过的区域。
-四样本无 FAIL 区域已经增加到 12 个。
-T009 是当前主要失败区域。
+四样本无 FAIL 区域仍为 12 个。
+T009 已不再 FAIL，当前唯一剩余 FAIL 是 T076_L / T008。
 ```
 
 因此，现在还不应该直接进入下周的平均耳计算或主成分分析。否则会把不完整或不稳定的区域带入统计模型，影响结果可靠性。
@@ -156,7 +164,7 @@ T009 是当前主要失败区域。
 ```text
 流程已经建立；
 真实数据已经跑通；
-更新 T078 PLY 后结果显著改善；
+更新 T078 PLY 与 T009 region 后结果显著改善；
 质量检查发现大多数区域已不再失败；
 下一步重点是把候选区域从 WARNING 优化到 PASS，而不是盲目进入统计分析。
 ```
@@ -165,20 +173,21 @@ T009 是当前主要失败区域。
 
 ## 9. 当前发现的主要问题
 
-当前问题集中在区域划分的稳定性上，尤其是 T009。
+当前问题集中在区域划分的稳定性上。T009 已通过更换特征点组合从 FAIL 改善为 WARNING/PASS；当前需要重点诊断的是 `T076_L / T008`。
 
-T009 在 r24 下仍表现为：
+当前剩余 FAIL 为：
 
 ```text
-patch_face_count = 195
-raw unmapped_count = 96 / 325
+T076_L / T008
+patch_face_count = 1323
+raw unmapped_count = 113 / 325
 raw status = FAIL
 repaired status = FAIL
 ```
 
 更可能的原因包括：
 
-1. T009 的三个特征点组合在不同耳形上不够稳定。
+1. T008 的三个特征点组合可能在 T076_L 上不够稳定。
 2. 网格表面的最短路径可能走了不符合解剖结构的捷径。
 3. 三条边界围出的区域可能过窄、过小或方向不正确。
 4. 某些区域需要进一步拆分，或者更换特征点组合。
@@ -219,9 +228,9 @@ repaired status = FAIL
 
 建议下一步按以下顺序推进：
 
-1. 优先查看 `output/qc_visualizations/T078_L/T002_qc.png`、`T008_qc.png`、`T010_qc.png`，这些区域已在 T078 上 PASS，可作为候选。
-2. 查看 `output/qc_visualizations/T078_L/T009_qc.png`，判断为什么仍有较多 unmapped 点。
-3. 对 T002/T007/T008/T004/T010 等无 FAIL 区域，尝试通过 region table 微调减少 unmapped 点。
+1. 优先查看 `output/qc_visualizations_r24/raw/T076_L/T008_qc.png` 和 `output/qc_visualizations_r24/repaired/T076_L/T008_qc.png`，判断 T076_L / T008 为什么仍有大量 unmapped 点。
+2. 查看四个样本的 T009 repaired 图，确认新组合 `L18-L29-L30` 的补点结果是否形态连续、无明显异常。
+3. 对无 FAIL 区域继续通过 region table 微调减少 raw unmapped 点。
 4. 根据 QC 图调整 `region_table.csv`，优先尝试替换不稳定特征点组合或拆分过大的区域。
 5. 每次调整后先跑重点区域，不要一开始全量跑所有区域。
 6. 只有当多个样本在同一区域全部 PASS 后，再将该区域作为 W3 输入候选。
@@ -231,8 +240,8 @@ repaired status = FAIL
 当前希望 mentor 帮忙确认：
 
 1. 当前 13 个三角区域的解剖划分是否合理。
-2. T002/T007/T008/T004/T010 是否可以作为第一批重点优化区域。
-3. T009 是否需要更换特征点组合或拆分区域。
+2. T009 新组合 `L18-L29-L30` 是否可以作为后续固定版本保留。
+3. T076_L / T008 是否需要更换特征点组合或拆分区域。
 4. 是否允许在某些复杂区域增加中间控制点，让边界更贴合耳部结构。
 5. W3 是否可以先从少数稳定区域开始做平均形态验证，而不是一开始要求整耳所有区域同时通过。
 
@@ -251,7 +260,7 @@ repaired status = FAIL
 质量检查与可视化
 ```
 
-更新 T078 PLY 后，结果相较之前显著改善，说明数据质量确实会影响 remesh 输出；但四样本仍没有共同 PASS 区域，说明下一步需要继续优化区域划分表。
+更新 T078 PLY 与 T009 region 后，结果相较之前显著改善，说明数据质量和 region table 都会显著影响 remesh 输出；但四样本 raw 层仍没有共同 PASS 区域，说明下一步需要继续优化区域划分表或明确 repaired 输出的使用边界。
 
 当前阶段可以向 mentor 汇报为：
 
