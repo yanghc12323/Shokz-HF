@@ -1,2 +1,0 @@
-sample_tag,region_id,region_name,sample_point_count,expected_point_count,unmapped_count,unmapped_ratio,flipped_faces,degenerate_faces,patch_face_count,remesh_face_count,status,sample_id,side,figure_path,error
-T013_L,T001,test,325,325,7,0.021538461538461538,0,0,7682,576,WARNING,T013,L,output\qc_visualizations_r24_smoke\raw\T013_L\T001_qc.png,

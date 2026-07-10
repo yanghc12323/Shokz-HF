@@ -25,7 +25,8 @@ script_output.txt
 # Project-specific: generated output (kept locally, not in repo)
 output/logs/
 output/figures/
-*.ply
+output/remesh/
+output/remesh_r24/
 
 # Project-specific: reference documents and binaries
 *.pdf
