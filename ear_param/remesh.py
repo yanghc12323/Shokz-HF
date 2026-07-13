@@ -130,6 +130,9 @@ class RepairedSamples:
     status: str
     exportable: bool
     repaired_unmapped_count: int
+    salvage_attempted: bool = False
+    salvage_accepted: bool = False
+    salvage_rejection_reason: str = ""
 
     @property
     def repaired_count(self) -> int:
@@ -158,33 +161,58 @@ def repair_unmapped_samples(
     result: RegionRemeshResult,
     *,
     fail_unmapped_ratio: float = 0.2,
+    allow_raw_fail_repair: bool = False,
+    max_raw_fail_repair_unmapped_ratio: float = 0.35,
     vertex_ring_steps: int = 2,
     smoothing_iterations: int = 80,
 ) -> RepairedSamples:
-    """Repair raw WARNING unmapped samples without changing raw QC semantics."""
+    """Repair unmapped samples without changing raw QC semantics.
+
+    By default only raw WARNING regions are repaired.  Set
+    allow_raw_fail_repair=True for the conservative salvage layer; degenerate
+    UV faces and heavily unmapped regions remain blocked.
+    """
     points = np.asarray(result.sample_points_3d, dtype=float).copy()
     raw_unmapped = np.asarray(result.located_samples.unmapped_mask, dtype=bool)
     n_samples = len(points)
+    n_raw_unmapped = int(raw_unmapped.sum())
+    n_degenerate = int(result.parameterization.degenerate_face_count)
     raw_status = classify_remesh_qc_status(
         n_samples,
-        int(raw_unmapped.sum()),
-        int(result.parameterization.degenerate_face_count),
+        n_raw_unmapped,
+        n_degenerate,
         fail_unmapped_ratio=fail_unmapped_ratio,
     )
     repair_methods = np.full(n_samples, "mapped", dtype=object)
     repair_methods[raw_unmapped] = "unrepaired"
     repaired_mask = np.zeros(n_samples, dtype=bool)
+    salvage_attempted = False
+    salvage_rejection_reason = ""
 
     if raw_status == "FAIL":
-        return RepairedSamples(
-            points_3d=points,
-            repaired_mask=repaired_mask,
-            repair_methods=repair_methods,
-            raw_status=raw_status,
-            status="FAIL",
-            exportable=False,
-            repaired_unmapped_count=int(raw_unmapped.sum()),
-        )
+        raw_unmapped_ratio = n_raw_unmapped / max(n_samples, 1)
+        if not allow_raw_fail_repair:
+            salvage_rejection_reason = "raw_fail_repair_disabled"
+        elif n_degenerate > 0:
+            salvage_rejection_reason = "degenerate_faces"
+        elif raw_unmapped_ratio > float(max_raw_fail_repair_unmapped_ratio):
+            salvage_rejection_reason = "unmapped_ratio"
+
+        if salvage_rejection_reason:
+            return RepairedSamples(
+                points_3d=points,
+                repaired_mask=repaired_mask,
+                repair_methods=repair_methods,
+                raw_status=raw_status,
+                status="FAIL",
+                exportable=False,
+                repaired_unmapped_count=n_raw_unmapped,
+                salvage_attempted=False,
+                salvage_accepted=False,
+                salvage_rejection_reason=salvage_rejection_reason,
+            )
+        salvage_attempted = True
+
     if raw_status == "PASS":
         return RepairedSamples(
             points_3d=points,
@@ -232,9 +260,12 @@ def repair_unmapped_samples(
     status = "PASS" if not repaired_unmapped.any() else classify_remesh_qc_status(
         n_samples,
         int(repaired_unmapped.sum()),
-        int(result.parameterization.degenerate_face_count),
+        n_degenerate,
         fail_unmapped_ratio=fail_unmapped_ratio,
     )
+    salvage_accepted = bool(salvage_attempted and status == "PASS")
+    if salvage_attempted and not salvage_accepted and not salvage_rejection_reason:
+        salvage_rejection_reason = "repair_incomplete"
     return RepairedSamples(
         points_3d=points,
         repaired_mask=repaired_mask,
@@ -243,6 +274,9 @@ def repair_unmapped_samples(
         status=status,
         exportable=status == "PASS",
         repaired_unmapped_count=int(repaired_unmapped.sum()),
+        salvage_attempted=salvage_attempted,
+        salvage_accepted=salvage_accepted,
+        salvage_rejection_reason=salvage_rejection_reason,
     )
 
 

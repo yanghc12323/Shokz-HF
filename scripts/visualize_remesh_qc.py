@@ -41,14 +41,22 @@ Example:
     parser.add_argument("--regions", default="config/region_table.csv", help="Region table CSV path.")
     parser.add_argument("--out_dir", default="output/qc_visualizations_r24", help="Output root directory.")
     parser.add_argument("--max_patch_faces", type=int, default=5000, help="Max patch faces drawn per 3D figure.")
+    parser.add_argument(
+        "--max_salvage_unmapped_ratio",
+        type=float,
+        default=0.35,
+        help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)
     raw_out_dir = out_dir / "raw"
     repaired_out_dir = out_dir / "repaired"
+    salvaged_out_dir = out_dir / "salvaged"
     raw_out_dir.mkdir(parents=True, exist_ok=True)
     repaired_out_dir.mkdir(parents=True, exist_ok=True)
+    salvaged_out_dir.mkdir(parents=True, exist_ok=True)
 
     sample_tags = args.samples if args.samples else _discover_sample_tags(data_dir)
     if not sample_tags:
@@ -63,6 +71,7 @@ Example:
 
     raw_summary_records: list[dict[str, object]] = []
     repaired_summary_records: list[dict[str, object]] = []
+    salvaged_summary_records: list[dict[str, object]] = []
     for sample_tag in sample_tags:
         sample_id, side = _split_sample_tag(sample_tag)
         mesh_path = data_dir / "clean_mesh" / f"{sample_tag}.ply"
@@ -77,6 +86,7 @@ Example:
             print(f"[QC] {sample_tag} {region_id}")
             raw_figure_path = raw_out_dir / sample_tag / f"{region_id}_qc.png"
             repaired_figure_path = repaired_out_dir / sample_tag / f"{region_id}_qc.png"
+            salvaged_figure_path = salvaged_out_dir / sample_tag / f"{region_id}_qc.png"
             try:
                 result = build_region_remesh(mesh, landmarks, region)
                 raw_record = classify_region_qc(sample_tag, result)
@@ -108,6 +118,26 @@ Example:
                     repaired_figure_path,
                     max_patch_faces=args.max_patch_faces,
                 )
+
+                salvaged = repair_unmapped_samples(
+                    result,
+                    allow_raw_fail_repair=True,
+                    max_raw_fail_repair_unmapped_ratio=args.max_salvage_unmapped_ratio,
+                )
+                salvaged_record = classify_repaired_region_qc(sample_tag, result, salvaged)
+                salvaged_record.update({
+                    "sample_id": sample_id,
+                    "side": side,
+                    "figure_path": str(salvaged_figure_path),
+                    "error": "",
+                })
+                save_region_repaired_qc_figure(
+                    mesh,
+                    result,
+                    salvaged,
+                    salvaged_figure_path,
+                    max_patch_faces=args.max_patch_faces,
+                )
             except Exception as exc:
                 raw_record = {
                     "sample_tag": sample_tag,
@@ -135,21 +165,31 @@ Example:
                     "repaired_unmapped_count": 0,
                     "repair_count": 0,
                     "repair_applied": False,
+                    "salvage_attempted": False,
+                    "salvage_accepted": False,
+                    "salvage_rejection_reason": "region_error",
                 })
+                salvaged_record = dict(repaired_record)
                 print(f"  [ERROR] {exc}")
             raw_summary_records.append(raw_record)
             repaired_summary_records.append(repaired_record)
+            salvaged_summary_records.append(salvaged_record)
 
     raw_summary = pd.DataFrame(raw_summary_records)
     repaired_summary = pd.DataFrame(repaired_summary_records)
+    salvaged_summary = pd.DataFrame(salvaged_summary_records)
     raw_summary_path = raw_out_dir / "qc_visualization_summary.csv"
     repaired_summary_path = repaired_out_dir / "qc_visualization_summary.csv"
+    salvaged_summary_path = salvaged_out_dir / "qc_visualization_summary.csv"
     raw_summary.to_csv(raw_summary_path, index=False)
     repaired_summary.to_csv(repaired_summary_path, index=False)
+    salvaged_summary.to_csv(salvaged_summary_path, index=False)
     print(f"[QC] Raw summary saved: {raw_summary_path}")
     print(pd.crosstab(raw_summary["sample_tag"], raw_summary["status"]).to_string())
     print(f"[QC] Repaired summary saved: {repaired_summary_path}")
     print(pd.crosstab(repaired_summary["sample_tag"], repaired_summary["status"]).to_string())
+    print(f"[QC] Salvaged summary saved: {salvaged_summary_path}")
+    print(pd.crosstab(salvaged_summary["sample_tag"], salvaged_summary["status"]).to_string())
 
 
 def _discover_sample_tags(data_dir: Path) -> list[str]:

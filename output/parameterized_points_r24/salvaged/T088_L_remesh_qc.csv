@@ -1,0 +1,16 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,raw_unmapped_count,raw_status,salvaged_unmapped_count,repair_count,repair_applied,salvage_attempted,salvage_accepted,salvage_rejection_reason,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T088,L,T001,test,325,325,576,5,WARNING,0,5,True,False,False,,0,0,4502,True,output\remesh_r24\salvaged\T088_L\T001_remesh_salvaged.ply,PASS
+T088,L,T002,test,325,325,576,0,PASS,0,0,False,False,False,,15909,0,15909,True,output\remesh_r24\salvaged\T088_L\T002_remesh_salvaged.ply,PASS
+T088,L,T003,test,325,325,576,0,PASS,0,0,False,False,False,,0,0,13013,True,output\remesh_r24\salvaged\T088_L\T003_remesh_salvaged.ply,PASS
+T088,L,T004,test,325,325,576,38,WARNING,0,38,True,False,False,,1621,0,1621,True,output\remesh_r24\salvaged\T088_L\T004_remesh_salvaged.ply,PASS
+T088,L,T005,test,325,325,576,0,PASS,0,0,False,False,False,,0,0,10843,True,output\remesh_r24\salvaged\T088_L\T005_remesh_salvaged.ply,PASS
+T088,L,T006,test,325,325,576,0,PASS,0,0,False,False,False,,2005,0,2005,True,output\remesh_r24\salvaged\T088_L\T006_remesh_salvaged.ply,PASS
+T088,L,T007,test,325,325,576,16,WARNING,0,16,True,False,False,,0,0,2288,True,output\remesh_r24\salvaged\T088_L\T007_remesh_salvaged.ply,PASS
+T088,L,T008,test,325,325,576,3,WARNING,0,3,True,False,False,,0,0,16372,True,output\remesh_r24\salvaged\T088_L\T008_remesh_salvaged.ply,PASS
+T088,L,T009,test,325,325,576,1,WARNING,0,1,True,False,False,,17585,0,17585,True,output\remesh_r24\salvaged\T088_L\T009_remesh_salvaged.ply,PASS
+T088,L,T010,test,325,325,576,1,WARNING,0,1,True,False,False,,0,0,4772,True,output\remesh_r24\salvaged\T088_L\T010_remesh_salvaged.ply,PASS
+T088,L,T011,test,325,325,576,2,WARNING,0,2,True,False,False,,8872,0,8872,True,output\remesh_r24\salvaged\T088_L\T011_remesh_salvaged.ply,PASS
+T088,L,T012,test,325,325,576,7,WARNING,0,7,True,False,False,,0,0,1141,True,output\remesh_r24\salvaged\T088_L\T012_remesh_salvaged.ply,PASS
+T088,L,T013,test,325,325,576,0,PASS,0,0,False,False,False,,8595,0,8595,True,output\remesh_r24\salvaged\T088_L\T013_remesh_salvaged.ply,PASS
+T088,L,T014,test,325,325,576,1,WARNING,0,1,True,False,False,,8325,0,8325,True,output\remesh_r24\salvaged\T088_L\T014_remesh_salvaged.ply,PASS
+T088,L,T015,test,325,325,576,164,FAIL,164,0,False,False,False,unmapped_ratio,143,0,143,False,,FAIL

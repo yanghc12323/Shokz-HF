@@ -282,7 +282,11 @@ def test_classify_remesh_qc_status_uses_shared_policy():
     assert classify_remesh_qc_status(45, 0, 1) == "FAIL"
 
 
-def _repair_test_result(unmapped_ids: list[int]) -> RegionRemeshResult:
+def _repair_test_result(
+    unmapped_ids: list[int],
+    *,
+    degenerate_face_count: int = 0,
+) -> RegionRemeshResult:
     template = make_subdivision_template(3)
     vertices = np.column_stack([
         template.uv[:, 0],
@@ -313,7 +317,7 @@ def _repair_test_result(unmapped_ids: list[int]) -> RegionRemeshResult:
         local_to_global=np.arange(len(vertices)),
         original_face_ids=np.arange(len(template.faces)),
         flipped_face_count=0,
-        degenerate_face_count=0,
+        degenerate_face_count=degenerate_face_count,
     )
     located = LocatedSamples(
         sample_uv=template.uv,
@@ -358,3 +362,41 @@ def test_repair_unmapped_samples_does_not_repair_raw_fail_regions():
     assert repaired.exportable is False
     assert repaired.repaired_count == 0
     assert repaired.repaired_unmapped_count == 3
+
+
+def test_repair_unmapped_samples_salvages_raw_fail_when_explicitly_allowed():
+    result = _repair_test_result([0, 1, 2])
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.raw_status == "FAIL"
+    assert repaired.status == "PASS"
+    assert repaired.exportable is True
+    assert repaired.salvage_attempted is True
+    assert repaired.salvage_accepted is True
+    assert repaired.salvage_rejection_reason == ""
+    assert repaired.repaired_unmapped_count == 0
+    assert repaired.repaired_count == 3
+
+
+def test_repair_unmapped_samples_salvage_refuses_degenerate_raw_fail():
+    result = _repair_test_result([0], degenerate_face_count=1)
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.raw_status == "FAIL"
+    assert repaired.status == "FAIL"
+    assert repaired.exportable is False
+    assert repaired.salvage_attempted is False
+    assert repaired.salvage_accepted is False
+    assert repaired.salvage_rejection_reason == "degenerate_faces"
+    assert repaired.repaired_count == 0
+    assert repaired.repaired_unmapped_count == 1

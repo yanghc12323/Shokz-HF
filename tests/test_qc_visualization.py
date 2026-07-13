@@ -174,6 +174,9 @@ def test_classify_repaired_region_qc_reports_repair_counts():
     assert record["repaired_unmapped_count"] == 0
     assert record["repair_count"] == 1
     assert record["repair_applied"] is True
+    assert record["salvage_attempted"] is False
+    assert record["salvage_accepted"] is False
+    assert record["salvage_rejection_reason"] == ""
 
 
 def test_save_region_repaired_qc_figure_writes_png():

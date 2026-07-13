@@ -1,7 +1,7 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
 > 适用阶段：W2 真实样本 remesh、QC 与 region table 优化  
-> 更新时间：2026-07-10  
+> 更新时间：2026-07-11  
 > 主入口：`scripts/parameterize_ear_remesh.py`  
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
@@ -21,16 +21,14 @@ W2 的目标是将 landmark 定义的三角区域从原始 3D mesh 中提取出�
 
 ## 2. 当前有效样本
 
-当前主线使用：
+当前主线使用 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的真实样本。目前项目内已有：
 
 ```text
-T013_L
-T076_L
-T077_L
-T078_L
+T013_L, T049_L, T076_L, T077_L, T078_L,
+T088_L, T094_L, T097_L, T099_L, T100_L
 ```
 
-当前 `config/region_table.csv` 包含 13 个 region，字段为：
+当前 `config/region_table.csv` 包含 15 个 region，字段为：
 
 ```text
 region_id,region_name,lm_a,lm_b,lm_c,resolution,use_for_pca
@@ -43,7 +41,7 @@ sample_point_count = 325
 remesh_face_count = 576
 ```
 
-最新 `region_table.csv` 已将 T009 的特征点组合调整为 `L18-L29-L30`，用于解决旧版 T009 在 r24 下持续 FAIL 的问题。
+T100_L 目前作为特殊诊断样本处理。如果某个 region 出现 `degenerate_faces > 0`，说明 UV 面片已经退化，不能仅靠补点进入 PCA。
 
 ## 3. VSCode 命令行运行方式
 
@@ -88,8 +86,10 @@ foreach ($s in $samples) {
 ```text
 output/parameterized_points_r24/raw/
 output/parameterized_points_r24/repaired/
+output/parameterized_points_r24/salvaged/
 output/remesh_r24/raw/
 output/remesh_r24/repaired/
+output/remesh_r24/salvaged/
 ```
 
 每个样本会输出：
@@ -101,7 +101,16 @@ output/remesh_r24/repaired/
 <sample>_<side>_remesh_qc.csv
 ```
 
-raw 目录保留原始映射结果；repaired 目录保留补点后的结果。raw PASS 直接导出 PLY；raw WARNING 在补点成功后导出 repaired PLY；raw FAIL 不补点、不导出。
+raw 目录保留原始映射结果；repaired 目录保留 raw WARNING 补点后的结果；salvaged 目录保留对 raw FAIL 的保守抢救结果。raw PASS 直接导出 PLY；raw WARNING 在补点成功后导出 repaired PLY；满足安全限制的 raw FAIL 会在 salvaged 层尝试导出。
+
+salvage 默认限制：
+
+```text
+--max_salvage_unmapped_ratio 0.35
+degenerate_faces > 0 时不 salvage
+unmapped 比例超过 0.35 时不 salvage
+salvage_accepted=True 只表示抢救成功，不等同于 raw PASS
+```
 
 ## 5. 运行 QC 可视化
 
@@ -124,61 +133,45 @@ output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
 output/qc_visualizations_r24/raw/qc_visualization_summary.csv
 output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
 output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
+output/qc_visualizations_r24/salvaged/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 ```
 
-每个 region 会输出 raw 和 repaired 两张图：
+每个 region 会输出 raw、repaired 和 salvaged 三张图：
 
 1. raw 图显示未修补前的原始映射状态，红色叉号表示 raw unmapped 点。
 2. repaired 图显示补点后的状态，橙色三角表示 repaired 点，红色叉号表示仍未修补点。
-3. 两张图都包含 3D patch faces、三条 boundary path、三个 landmark 点、2D UV patch 和 template sample 点。
+3. salvaged 图显示 raw FAIL 保守抢救后的状态；如果没有满足安全限制，会保留未修补点并在 summary 中写明原因。
+4. 三张图都包含 3D patch faces、三条 boundary path、三个 landmark 点、2D UV patch 和 template sample 点。
 
 QC 图的用途是定位问题原因，而不是直接调阈值。
 
-## 6. 当前 QC 结果
+## 6. 当前 QC 结果查看方式
 
-历史 r8 四样本 baseline：
+注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING；salvaged 层会在 `degenerate_faces == 0` 且 raw unmapped 比例不超过 `--max_salvage_unmapped_ratio` 时，对 raw FAIL 尝试同一套角点替换和平滑插值。
 
-```text
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1
-共同 PASS region: 0
-完全无 FAIL region: 12
-```
-
-当前 r24 四样本结果：
+当前结果以最新 CSV 为准：
 
 ```text
-raw:
-T013_L: PASS=2, WARNING=11, FAIL=0
-T076_L: PASS=1, WARNING=11, FAIL=1
-T077_L: PASS=1, WARNING=12, FAIL=0
-T078_L: PASS=2, WARNING=11, FAIL=0
-
-repaired:
-T013_L: PASS=13, WARNING=0, FAIL=0
-T076_L: PASS=12, WARNING=0, FAIL=1
-T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=13, WARNING=0, FAIL=0
+output/parameterized_points_r24/raw/<sample>_L_remesh_qc.csv
+output/parameterized_points_r24/repaired/<sample>_L_remesh_qc.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_qc.csv
 ```
 
-注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING，不处理 raw FAIL。
-
-关键变化：
+salvaged QC 中重点看：
 
 ```text
-T009 新组合 L18-L29-L30:
-T013_L raw unmapped=1/325,  repaired PASS
-T076_L raw unmapped=4/325,  repaired PASS
-T077_L raw unmapped=51/325, repaired PASS
-T078_L raw unmapped=6/325,  repaired PASS
-
-当前剩余 FAIL:
-T076_L / T008: raw unmapped=113/325, repaired FAIL
+raw_status
+salvaged_unmapped_count
+salvage_attempted
+salvage_accepted
+salvage_rejection_reason
+degenerate_faces
+patch_face_count
+mesh_exported
 ```
 
-r24 repaired 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐。当前 T009 已不再是 FAIL 区域；下一步应重点诊断 `T076_L / T008`。
+r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐；但 `salvage_accepted=True` 仍只是“抢救后可导出”，不等于 raw 映射质量本身已经可靠。后续进入 W3 前仍需结合 QC 图和人工判断。
 
 ## 7. QC 判定规则
 

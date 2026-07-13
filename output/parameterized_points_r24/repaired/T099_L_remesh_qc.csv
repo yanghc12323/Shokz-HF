@@ -1,0 +1,16 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,raw_unmapped_count,raw_status,repaired_unmapped_count,repair_count,repair_applied,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T099,L,T001,test,325,325,576,1,WARNING,0,1,True,0,0,5426,True,output\remesh_r24\repaired\T099_L\T001_remesh_repaired.ply,PASS
+T099,L,T002,test,325,325,576,1,WARNING,0,1,True,13673,0,13673,True,output\remesh_r24\repaired\T099_L\T002_remesh_repaired.ply,PASS
+T099,L,T003,test,325,325,576,2,WARNING,0,2,True,0,0,13789,True,output\remesh_r24\repaired\T099_L\T003_remesh_repaired.ply,PASS
+T099,L,T004,test,325,325,576,1,WARNING,0,1,True,6710,0,6710,True,output\remesh_r24\repaired\T099_L\T004_remesh_repaired.ply,PASS
+T099,L,T005,test,325,325,576,0,PASS,0,0,False,0,0,6483,True,output\remesh_r24\repaired\T099_L\T005_remesh_repaired.ply,PASS
+T099,L,T006,test,325,325,576,0,PASS,0,0,False,1961,0,1961,True,output\remesh_r24\repaired\T099_L\T006_remesh_repaired.ply,PASS
+T099,L,T007,test,325,325,576,0,PASS,0,0,False,0,0,1964,True,output\remesh_r24\repaired\T099_L\T007_remesh_repaired.ply,PASS
+T099,L,T008,test,325,325,576,0,PASS,0,0,False,0,0,14765,True,output\remesh_r24\repaired\T099_L\T008_remesh_repaired.ply,PASS
+T099,L,T009,test,325,325,576,1,WARNING,0,1,True,7600,0,7600,True,output\remesh_r24\repaired\T099_L\T009_remesh_repaired.ply,PASS
+T099,L,T010,test,325,325,576,0,PASS,0,0,False,0,0,2752,True,output\remesh_r24\repaired\T099_L\T010_remesh_repaired.ply,PASS
+T099,L,T011,test,325,325,576,5,WARNING,0,5,True,2713,0,2713,True,output\remesh_r24\repaired\T099_L\T011_remesh_repaired.ply,PASS
+T099,L,T012,test,325,325,576,46,WARNING,0,46,True,0,0,697,True,output\remesh_r24\repaired\T099_L\T012_remesh_repaired.ply,PASS
+T099,L,T013,test,325,325,576,0,PASS,0,0,False,22621,0,22621,True,output\remesh_r24\repaired\T099_L\T013_remesh_repaired.ply,PASS
+T099,L,T014,test,325,325,576,3,WARNING,0,3,True,8321,0,8321,True,output\remesh_r24\repaired\T099_L\T014_remesh_repaired.ply,PASS
+T099,L,T015,test,325,325,576,67,FAIL,67,0,False,0,0,632,False,,FAIL

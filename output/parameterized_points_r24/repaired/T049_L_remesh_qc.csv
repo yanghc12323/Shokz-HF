@@ -1,0 +1,16 @@
+sample_id,side,region_id,region_name,sample_point_count,expected_point_count,remesh_face_count,raw_unmapped_count,raw_status,repaired_unmapped_count,repair_count,repair_applied,flipped_faces,degenerate_faces,patch_face_count,mesh_exported,mesh_path,status
+T049,L,T001,test,325,325,576,2,WARNING,0,2,True,0,0,5841,True,output\remesh_r24\repaired\T049_L\T001_remesh_repaired.ply,PASS
+T049,L,T002,test,325,325,576,3,WARNING,0,3,True,18906,0,18906,True,output\remesh_r24\repaired\T049_L\T002_remesh_repaired.ply,PASS
+T049,L,T003,test,325,325,576,90,FAIL,90,0,False,0,0,505,False,,FAIL
+T049,L,T004,test,325,325,576,0,PASS,0,0,False,24959,0,24959,True,output\remesh_r24\repaired\T049_L\T004_remesh_repaired.ply,PASS
+T049,L,T005,test,325,325,576,1,WARNING,0,1,True,0,0,9470,True,output\remesh_r24\repaired\T049_L\T005_remesh_repaired.ply,PASS
+T049,L,T006,test,325,325,576,9,WARNING,0,9,True,2295,0,2295,True,output\remesh_r24\repaired\T049_L\T006_remesh_repaired.ply,PASS
+T049,L,T007,test,325,325,576,0,PASS,0,0,False,0,0,2407,True,output\remesh_r24\repaired\T049_L\T007_remesh_repaired.ply,PASS
+T049,L,T008,test,325,325,576,0,PASS,0,0,False,0,0,8902,True,output\remesh_r24\repaired\T049_L\T008_remesh_repaired.ply,PASS
+T049,L,T009,test,325,325,576,0,PASS,0,0,False,24830,0,24830,True,output\remesh_r24\repaired\T049_L\T009_remesh_repaired.ply,PASS
+T049,L,T010,test,325,325,576,8,WARNING,0,8,True,0,0,1725,True,output\remesh_r24\repaired\T049_L\T010_remesh_repaired.ply,PASS
+T049,L,T011,test,325,325,576,16,WARNING,0,16,True,4802,0,4802,True,output\remesh_r24\repaired\T049_L\T011_remesh_repaired.ply,PASS
+T049,L,T012,test,325,325,576,2,WARNING,0,2,True,0,0,2035,True,output\remesh_r24\repaired\T049_L\T012_remesh_repaired.ply,PASS
+T049,L,T013,test,325,325,576,0,PASS,0,0,False,3077,0,3077,True,output\remesh_r24\repaired\T049_L\T013_remesh_repaired.ply,PASS
+T049,L,T014,test,325,325,576,7,WARNING,0,7,True,13641,0,13641,True,output\remesh_r24\repaired\T049_L\T014_remesh_repaired.ply,PASS
+T049,L,T015,test,325,325,576,307,FAIL,307,0,False,14,0,14,False,,FAIL

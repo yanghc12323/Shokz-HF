@@ -1,0 +1,2 @@
+edge_id,lm_start,lm_end,control_points,active,reason
+L21_L29,L21,L29,M01,1,边界路径容易抄近路

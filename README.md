@@ -1,8 +1,8 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
 > 当前主线：论文式 patch-based remesh  
-> 当前阶段：W2 remesh 主流程已可运行，正在做四样本 QC 与 region table 优化  
-> 更新时间：2026-07-10
+> 当前阶段：W2 remesh 主流程已可运行，正在做多样本 QC、region table 优化与 raw FAIL 保守 salvage  
+> 更新时间：2026-07-11
 
 ## 1. 项目目标
 
@@ -23,20 +23,14 @@
 
 ## 2. 当前真实数据状态
 
-当前有效真实样本：
+当前有效真实样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。目前项目内已有：
 
 ```text
-data/clean_mesh/T013_L.ply
-data/landmarks/T013_L_landmarks.csv
-data/clean_mesh/T076_L.ply
-data/landmarks/T076_L_landmarks.csv
-data/clean_mesh/T077_L.ply
-data/landmarks/T077_L_landmarks.csv
-data/clean_mesh/T078_L.ply
-data/landmarks/T078_L_landmarks.csv
+T013_L, T049_L, T076_L, T077_L, T078_L,
+T088_L, T094_L, T097_L, T099_L, T100_L
 ```
 
-当前 `config/region_table.csv` 包含 13 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。最新版本已将 T009 的 landmark 组合更新为 `L18-L29-L30`，用于解决旧版 T009 持续 FAIL 的问题。
+当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。T100_L 目前作为特殊诊断样本处理；如果出现 `degenerate_faces`，不要直接把它混入 W3 PCA 输入。
 
 旧的 `T001_L` 输入和输出已经从当前主线移除。不要再把旧 T001 结果作为当前 13 区域方案的有效结果使用。
 
@@ -108,6 +102,9 @@ foreach ($s in $samples) {
 --mesh_out_dir output/remesh_r24/raw
 --repaired_out_dir output/parameterized_points_r24/repaired
 --repaired_mesh_out_dir output/remesh_r24/repaired
+--salvaged_out_dir output/parameterized_points_r24/salvaged
+--salvaged_mesh_out_dir output/remesh_r24/salvaged
+--max_salvage_unmapped_ratio 0.35
 ```
 
 输出文件：
@@ -120,11 +117,24 @@ output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
 output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
 output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
 output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
+output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_points.csv
+output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_faces.csv
+output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_qc.csv
 output/remesh_r24/raw/<sample>_<side>/<region_id>_remesh.ply
 output/remesh_r24/repaired/<sample>_<side>/<region_id>_remesh_repaired.ply
+output/remesh_r24/salvaged/<sample>_<side>/<region_id>_remesh_salvaged.ply
 ```
 
-说明：raw PLY 只导出原始 PASS 区域；repaired PLY 允许 raw WARNING 在补点成功后导出。raw FAIL 区域仍不补点、不导出。
+说明：raw PLY 只导出原始 PASS 区域；repaired PLY 允许 raw WARNING 在补点成功后导出；salvaged 层会在不改变 raw/repaired 语义的前提下，对满足安全限制的 raw FAIL 尝试少量修补并单独导出。
+
+当前 salvage 安全限制：
+
+```text
+degenerate_faces > 0：不 salvage
+raw unmapped ratio > --max_salvage_unmapped_ratio：不 salvage
+默认 --max_salvage_unmapped_ratio = 0.35
+salvage_accepted=True 只表示抢救后无 unmapped 且可导出，不等同于 raw PASS
+```
 
 ## 6. 运行 QC 可视化
 
@@ -147,69 +157,43 @@ output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
 output/qc_visualizations_r24/raw/qc_visualization_summary.csv
 output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
 output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
+output/qc_visualizations_r24/salvaged/<sample_tag>/<region_id>_qc.png
+output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 ```
 
-每个 region 会输出两张 QC 图：
+每个 region 会输出三张 QC 图：
 
 1. `raw` 图：显示未修补前的原始映射结果，右侧红色叉号为 raw unmapped template 点。
 2. `repaired` 图：显示修补后的结果，右侧橙色三角为 repaired 点，红色叉号为仍未修补点。
+3. `salvaged` 图：显示对 raw FAIL 进行保守 salvage 后的结果；如果没有满足安全限制，会保留未修补状态并在 summary 中写明原因。
 
-两张图左侧都显示 3D patch faces、三条 landmark boundary path 和三个 landmark 点；右侧都显示 2D UV patch 与固定 template samples。
+三张图左侧都显示 3D patch faces、三条 landmark boundary path 和三个 landmark 点；右侧都显示 2D UV patch 与固定 template samples。
 
 这些图用于判断 region 失败到底是 landmark 组合问题、边界最短路径问题、patch 过窄问题，还是 UV 覆盖问题。
 
 ## 7. 当前 QC 结果
 
-历史 r8 四样本 baseline：
-
-```text
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1  (已使用更新后的 landmark 表和 PLY)
-共同 PASS region: 0
-完全无 FAIL region: 12
-```
-
-当前 r24 四样本结果：
-
-```text
-raw:
-T013_L: PASS=2, WARNING=11, FAIL=0
-T076_L: PASS=1, WARNING=11, FAIL=1
-T077_L: PASS=1, WARNING=12, FAIL=0
-T078_L: PASS=2, WARNING=11, FAIL=0
-
-repaired:
-T013_L: PASS=13, WARNING=0, FAIL=0
-T076_L: PASS=12, WARNING=0, FAIL=1
-T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=13, WARNING=0, FAIL=0
-```
-
 `scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
 
-repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。raw FAIL 不修补。
+repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。salvaged 层在相同修补算法基础上，额外允许一部分 raw FAIL 尝试修补，但会记录 `salvage_attempted`、`salvage_accepted` 和 `salvage_rejection_reason`。
 
-四样本 region 汇总的关键现象：
+当前 QC 结果不要再以旧四样本静态表为准，应直接读取最新输出：
 
 ```text
-T009 已由旧版 `L28-L29-L30` 调整为 `L18-L29-L30`，最新四样本结果均不再 FAIL：
-T013_L / T009: raw unmapped=1/325,  raw WARNING, repaired PASS
-T076_L / T009: raw unmapped=4/325,  raw WARNING, repaired PASS
-T077_L / T009: raw unmapped=51/325, raw WARNING, repaired PASS
-T078_L / T009: raw unmapped=6/325,  raw WARNING, repaired PASS
-
-当前剩余 FAIL:
-T076_L / T008: raw unmapped=113/325, raw FAIL, repaired FAIL
+output/parameterized_points_r24/raw/<sample>_L_remesh_qc.csv
+output/parameterized_points_r24/repaired/<sample>_L_remesh_qc.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_qc.csv
+output/qc_visualizations_r24/raw/qc_visualization_summary.csv
+output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
+output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 ```
 
 当前判断：
 
-1. 四个样本都能完成脚本运行并产出 points/faces/features/QC。
-2. r24 输出已经在四个样本上验证可运行，每个 region 输出 325 点、576 面。
-3. T009 的 region table 更新有效，已从旧版 raw FAIL 改善为四样本 raw WARNING、repaired PASS。
-4. 当前唯一剩余 FAIL 是 `T076_L / T008`，仍需后续针对该区域做 region table 或边界策略诊断。
+1. 已就位样本都可以通过同一条 CLI 运行并产出 points/faces/features/QC。
+2. r24 输出保持每个 region 325 点、576 面。
+3. 当前已新增 salvaged 层，用于记录 raw FAIL 是否能被保守修补。
+4. 如果 `degenerate_faces > 0` 或 `salvage_rejection_reason` 非空，应优先回到 boundary/region table 诊断。
 5. 当前仍不建议盲目放宽 QC 或直接进入正式 W3 PCA。
 
 ## 8. 当前处理策略
@@ -224,9 +208,9 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 
 具体原则：
 
-1. 先对比 `output/qc_visualizations_r24/raw/T078_L/*.png` 与 `output/qc_visualizations_r24/repaired/T078_L/*.png`，确认 T078 的 patch 退化位置和补点效果。
-2. 单独分析 `T076_L / T008`，它是当前四样本中唯一仍然 FAIL 的区域。
-3. 持续观察 T009：新 landmark 组合已经解决 FAIL，但 `T077_L / T009` 仍有 51 个 raw unmapped 点，后续是否接受 repaired 结果进入 W3 需要谨慎确认。
+1. 先对比同一样本、同一区域的 raw / repaired / salvaged 三张图。
+2. raw FAIL 先看 `salvage_rejection_reason`：`degenerate_faces` 和 `unmapped_ratio` 都说明不应靠补点硬救。
+3. 对反复失败的共享边，周一继续推进人工 M 点方案，用解剖控制点约束最短路径。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
 5. W3 只使用多个样本在同一 region 上同时 `PASS` 的区域。
 
