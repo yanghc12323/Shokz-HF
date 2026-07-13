@@ -1,8 +1,8 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
-> 当前主线：论文式 patch-based remesh  
-> 当前阶段：W2 remesh 主流程已可运行，正在做多样本 QC、region table 优化与 raw FAIL 保守 salvage  
-> 更新时间：2026-07-11
+> 当前主线：论文式 patch-based remesh
+> 当前阶段：W2 已完成整耳共享边修补与刚体统一坐标系；8 个样本具备 W3 PCA 输入资格
+> 更新时间：2026-07-13
 
 ## 1. 项目目标
 
@@ -27,12 +27,12 @@
 
 ```text
 T013_L, T049_L, T076_L, T077_L, T078_L,
-T088_L, T094_L, T097_L, T099_L, T100_L
+T088_L, T094_L, T097_L, T099_L
 ```
 
-当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。T100_L 目前作为特殊诊断样本处理；如果出现 `degenerate_faces`，不要直接把它混入 W3 PCA 输入。
+当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。正式整耳输入采用 `salvaged` 层；当前 9 个样本的 15 个 region 均为 salvaged PASS。
 
-旧的 `T001_L` 输入和输出已经从当前主线移除。不要再把旧 T001 结果作为当前 13 区域方案的有效结果使用。
+旧的 `T001_L` 和特殊诊断样本 `T100_L/T0100_L` 已从当前批处理移除，不应混入当前 15 区域结果。
 
 ## 3. 当前 W2 进展
 
@@ -92,6 +92,25 @@ $samples = "T013","T076","T077","T078"
 foreach ($s in $samples) {
   python scripts/parameterize_ear_remesh.py --sample_id $s --side L --mesh "data/clean_mesh/${s}_L.ply" --landmarks "data/landmarks/${s}_L_landmarks.csv"
 }
+```
+
+批量运行时，每个样本结束都会扫描当前输出目录中的所有 `*_remesh_qc.csv`，并在终端最后打印按样本汇总表。跑完最后一个样本后，终端末尾会看到类似：
+
+```text
+[Remesh] Raw sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L     8        5     2     15
+    T076_L     7        6     2     15
+
+[Remesh] Repaired sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L    13        0     2     15
+    T076_L    12        0     3     15
+
+[Remesh] Salvaged sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L    14        0     1     15
+    T076_L    13        0     2     15
 ```
 
 默认参数：
@@ -212,7 +231,7 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 2. raw FAIL 先看 `salvage_rejection_reason`：`degenerate_faces` 和 `unmapped_ratio` 都说明不应靠补点硬救。
 3. 对反复失败的共享边，周一继续推进人工 M 点方案，用解剖控制点约束最短路径。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
-5. W3 只使用多个样本在同一 region 上同时 `PASS` 的区域。
+5. W3 不再直接读取独立 region；只使用整耳焊接 `pca_ready=True` 且刚体对齐 `status=PASS` 的样本。
 
 ## 9. 输出文件说明
 
@@ -280,7 +299,43 @@ unmapped_count == 0
 degenerate_faces == 0
 ```
 
-## 10. 当前主线文件
+## 10. 构建整耳并统一坐标系
+
+正式输入固定为 W2 `salvaged` 层。全局模板按 landmark 身份和共享 landmark 边建立，不按三维距离猜测合并点；当前模板每个样本固定为 4453 个唯一顶点、8640 个三角面和 17 条共享边。每个 region 的局部面必须与其 resolution 对应的标准细分模板逐面一致，否则整耳直接标记为 FAIL。`salvaged` 是不可改写的基线证据；正式 PCA 输入来自其后的独立 `weld_repaired` 层。
+
+先构建整耳并运行焊接 QC：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
+```
+
+再建立保守的共享边修补层。它只修补局部 WARNING：双方均为修补点、连续长度不超过 2、两侧 raw 状态均非 FAIL、存在可信锚点且投影回原始 mesh 后冲突不超过 0.25 mm。它不会放行 raw FAIL 相邻边。
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
+```
+
+最后对 `weld_repaired` 中 `PCA_READY` 整耳做刚体 Generalized Procrustes / Kabsch：
+
+```powershell
+python scripts/align_whole_ear.py --whole_ear_dir output/whole_ear_r24/weld_repaired --landmarks_dir data/landmarks --out_dir output/whole_ear_r24/aligned_weld_repaired
+```
+
+焊接 QC 区分两类距离：
+
+1. `max_replacement_distance_mm`：一侧是原始 mapped、另一侧是 salvaged 修补点时，用 mapped 边界替换修补边界所需的位移；它被完整记录，但不等同于可靠边界冲突。
+2. `max_conflict_distance_mm`：两侧同为 mapped，或两侧都没有 mapped 权威坐标时的差异；PASS/WARNING/FAIL 使用该值判断，默认阈值为 0.25/1.00 mm。
+
+当前 `weld_repaired` whole-ear 结果：
+
+```text
+PASS / PCA_READY: T013_L, T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
+FAIL:             T049_L（L13-L17 邻接 T003 raw FAIL，自动修补被拒绝）
+```
+
+T094_L 的 L20-L21 在 index 1 由 0.4135 mm 冲突修补为 0；T097_L 的 L21-L29 在 index 23 由 0.3098 mm 冲突修补为 0。两点均通过锚点插值和原始 mesh 表面投影。8 个 `PCA_READY` 样本已完成刚体对齐，GPA 均收敛，所有 `det(R)=1`，最大 mesh 边长保持误差约为 `1.84e-14 mm`。
+
+## 11. 当前主线文件
 
 | 文件 | 作用 |
 |---|---|
@@ -288,32 +343,22 @@ degenerate_faces == 0
 | `ear_param/qc_visualization.py` | remesh QC 可视化 |
 | `scripts/parameterize_ear_remesh.py` | W2 remesh 命令行入口 |
 | `scripts/visualize_remesh_qc.py` | QC 可视化命令行入口 |
+| `ear_param/whole_ear.py` | 全局模板、共享边坐标选择与焊接 QC |
+| `scripts/build_whole_ear.py` | 整耳构建、共享边修补、PLY/CSV/QC 图批处理入口 |
+| `ear_param/alignment.py` | 刚体 Kabsch 与 Generalized Procrustes |
+| `scripts/align_whole_ear.py` | 整耳坐标统一与对齐 QC 入口 |
 | `docs/remesh_usage_w2.md` | W2 使用说明 |
+| `docs/whole_ear_weld_and_alignment.md` | 整耳焊接与坐标统一说明 |
 | `docs/qc_visualization_and_region_strategy.md` | QC 与 region table 优化策略 |
 | `docs/w3_pca_average_ear_technical_route.md` | W3 PCA 平均耳技术路线 |
 
-## 11. Legacy 代码说明
+## 12. 项目范围
 
-仓库中仍保留早期参数化采样/KDTree 插值路线：
+本仓库仅保留论文式 patch-based remesh、W2 质量控制、整耳焊接、共享边修补和刚体坐标统一主线。早期 KDTree 参数化采样路线及其旧命令行、模拟数据、可视化、校验脚本和测试已移除；它们不能作为 remesh 失败时的回退方案，也不能作为 W3 PCA 输入。
 
-```text
-ear_param/core.py
-ear_param/run.py
-ear_param/synthetic.py
-ear_param/visualization.py
-scripts/parameterize_ear.py
-tests/test_core.py
-```
+当前通用的二维标准三角形采样网格由 `ear_param/remesh.py` 直接维护，仍保持每个 resolution 的固定点数与点序。
 
-这些代码不是当前论文式 remesh 主线，但暂时不建议直接删除。原因是它们仍保留历史算法对照、模拟数据、旧数值工具测试和回退价值。等 W3 PCA 平均耳流程完成并稳定后，再单独做 legacy 清理。
-
-详细评估见：
-
-```text
-docs/non_remesh_code_assessment.md
-```
-
-## 12. 测试
+## 13. 测试
 
 运行全部测试：
 
@@ -324,22 +369,22 @@ python -m pytest -q
 当前验证结果：
 
 ```text
-91 passed
+47 passed
 ```
 
 备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。
 
-## 13. W3 前置条件
+## 14. W3 前置条件
 
-W3 不应再读取原始高密度 mesh，也不应重新做 remesh。W3 的可信输入是 W2 合格输出：
+W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整耳 PCA 的可信输入是：
 
 ```text
-*_remesh_points.csv
-*_remesh_faces.csv
-*_remesh_qc.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
+output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
 ```
 
-当前不建议直接进入 W3 正式 PCA。原因是四个样本暂无共同 PASS region。下一阶段应先通过 T0/T1/T2 得到多个样本在同一 region 上同时 PASS 的数据。
+只有上游 `weld_repaired` 的 `weld_qc_summary.csv` 中 `pca_ready=True` 且对齐 QC 为 PASS 的样本可以进入正式 PCA。当前首批候选为 8 个样本；样本量仍较小，适合流程实现与初步验证，不应将统计结果解释为稳定总体模型。
 
 W3 技术路线详见：
 
@@ -347,7 +392,7 @@ W3 技术路线详见：
 docs/w3_pca_average_ear_technical_route.md
 ```
 
-## 14. 文档维护规则
+## 15. 文档维护规则
 
 每次代码调整、功能开发、数据流程变化或 QC 结论变化后，都应同步更新：
 

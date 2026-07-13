@@ -12,5 +12,5 @@ T097,L,T010,test,325,325,576,4,WARNING,0,4,True,0,0,3032,True,output\remesh_r24\
 T097,L,T011,test,325,325,576,0,PASS,0,0,False,13565,0,13565,True,output\remesh_r24\repaired\T097_L\T011_remesh_repaired.ply,PASS
 T097,L,T012,test,325,325,576,4,WARNING,0,4,True,0,0,2093,True,output\remesh_r24\repaired\T097_L\T012_remesh_repaired.ply,PASS
 T097,L,T013,test,325,325,576,1,WARNING,0,1,True,7693,0,7693,True,output\remesh_r24\repaired\T097_L\T013_remesh_repaired.ply,PASS
-T097,L,T014,test,325,325,576,1,WARNING,0,1,True,10711,0,10711,True,output\remesh_r24\repaired\T097_L\T014_remesh_repaired.ply,PASS
-T097,L,T015,test,325,325,576,24,WARNING,0,24,True,1026,0,1026,True,output\remesh_r24\repaired\T097_L\T015_remesh_repaired.ply,PASS
+T097,L,T014,test,325,325,576,0,PASS,0,0,False,0,0,7577,True,output\remesh_r24\repaired\T097_L\T014_remesh_repaired.ply,PASS
+T097,L,T015,test,325,325,576,12,WARNING,0,12,True,2108,0,2108,True,output\remesh_r24\repaired\T097_L\T015_remesh_repaired.ply,PASS

@@ -12,5 +12,5 @@ T049,L,T010,test,325,325,576,8,WARNING,0,8,True,False,False,,0,0,1725,True,outpu
 T049,L,T011,test,325,325,576,16,WARNING,0,16,True,False,False,,4802,0,4802,True,output\remesh_r24\salvaged\T049_L\T011_remesh_salvaged.ply,PASS
 T049,L,T012,test,325,325,576,2,WARNING,0,2,True,False,False,,0,0,2035,True,output\remesh_r24\salvaged\T049_L\T012_remesh_salvaged.ply,PASS
 T049,L,T013,test,325,325,576,0,PASS,0,0,False,False,False,,3077,0,3077,True,output\remesh_r24\salvaged\T049_L\T013_remesh_salvaged.ply,PASS
-T049,L,T014,test,325,325,576,7,WARNING,0,7,True,False,False,,13641,0,13641,True,output\remesh_r24\salvaged\T049_L\T014_remesh_salvaged.ply,PASS
-T049,L,T015,test,325,325,576,307,FAIL,307,0,False,False,False,unmapped_ratio,14,0,14,False,,FAIL
+T049,L,T014,test,325,325,576,9,WARNING,0,9,True,False,False,,0,0,8694,True,output\remesh_r24\salvaged\T049_L\T014_remesh_salvaged.ply,PASS
+T049,L,T015,test,325,325,576,3,WARNING,0,3,True,False,False,,4933,0,4933,True,output\remesh_r24\salvaged\T049_L\T015_remesh_salvaged.ply,PASS

@@ -1,8 +1,8 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
-> 适用阶段：W2 真实样本 remesh、QC 与 region table 优化  
-> 更新时间：2026-07-11  
-> 主入口：`scripts/parameterize_ear_remesh.py`  
+> 适用阶段：W2 真实样本 remesh、QC 与 region table 优化
+> 更新时间：2026-07-13
+> 主入口：`scripts/parameterize_ear_remesh.py`
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
 ## 1. 当前目标
@@ -25,7 +25,7 @@ W2 的目标是将 landmark 定义的三角区域从原始 3D mesh 中提取出�
 
 ```text
 T013_L, T049_L, T076_L, T077_L, T078_L,
-T088_L, T094_L, T097_L, T099_L, T100_L
+T088_L, T094_L, T097_L, T099_L
 ```
 
 当前 `config/region_table.csv` 包含 15 个 region，字段为：
@@ -41,7 +41,7 @@ sample_point_count = 325
 remesh_face_count = 576
 ```
 
-T100_L 目前作为特殊诊断样本处理。如果某个 region 出现 `degenerate_faces > 0`，说明 UV 面片已经退化，不能仅靠补点进入 PCA。
+T100_L 已退出当前正式批次，历史上的退化面问题仅保留为诊断案例。如果任意新样本出现 `degenerate_faces > 0`，说明 UV 面片已经退化，不能仅靠补点进入 PCA。
 
 ## 3. VSCode 命令行运行方式
 
@@ -79,6 +79,25 @@ $samples = "T013","T076","T077","T078"
 foreach ($s in $samples) {
   python scripts/parameterize_ear_remesh.py --sample_id $s --side L --mesh "data/clean_mesh/${s}_L.ply" --landmarks "data/landmarks/${s}_L_landmarks.csv"
 }
+```
+
+每次脚本结束时会打印本次样本的统计，并额外扫描输出目录里已有的全部 `*_remesh_qc.csv`，输出按样本汇总表。批量跑完最后一个样本后，终端最后的三张表就是当前批次的 raw、repaired、salvaged 总览：
+
+```text
+[Remesh] Raw sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L     8        5     2     15
+    T076_L     7        6     2     15
+
+[Remesh] Repaired sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L    13        0     2     15
+    T076_L    12        0     3     15
+
+[Remesh] Salvaged sample summary:
+sample_tag  PASS  WARNING  FAIL  TOTAL
+    T013_L    14        0     1     15
+    T076_L    13        0     2     15
 ```
 
 输出目录：
@@ -171,11 +190,11 @@ patch_face_count
 mesh_exported
 ```
 
-r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐；但 `salvage_accepted=True` 仍只是“抢救后可导出”，不等于 raw 映射质量本身已经可靠。后续进入 W3 前仍需结合 QC 图和人工判断。
+r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐；但 `salvage_accepted=True` 仍只是“抢救后可导出”，不等于 raw 映射质量本身已经可靠。`salvaged` 是 W2 不可改写的 region 级基线，不直接作为 PCA 文件；后续仍需经过整耳焊接、共享边修补、刚体对齐和相应 QC。
 
 ## 7. QC 判定规则
 
-当前 region 可进入后续 W3 的最低条件：
+当前 region 可作为后续整耳构建输入的最低条件：
 
 ```text
 status == PASS
@@ -221,9 +240,47 @@ T2：在 region 定义合理后，再调边界路径、patch 选择或其它参�
 至少找到若干 region，使它们在多个真实样本上全部 PASS。
 ```
 
-这些 region 才能作为 W3 的第一批候选输入。
+这些 region 才能作为整耳构建的第一批候选输入。是否进入 W3 还取决于 17 条共享边的 weld QC、共享边修补审计和刚体对齐 QC。
 
-## 10. 文档维护
+## 10. W2 到整耳流程的交付
+
+当前整耳构建正式使用 `salvaged` 层，而不是 raw 或 repaired 层：
+
+```text
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_points.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_faces.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_qc.csv
+```
+
+运行整耳构建：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
+```
+
+该步骤不会改变 W2 的 raw/repaired/salvaged 文件。它利用 `region_table.csv` 建立一次性的全局模板，把同一 landmark 角点和共享 landmark 边上的对应采样点绑定为唯一 `global_vertex_id`，输出 welded PLY 和焊接 QC。此命令只生成不可改写的 `output/whole_ear_r24/salvaged` 基线。
+
+焊接 QC 不会把所有 pre-weld 距离都当作失败：当一侧是可靠 mapped 点、另一侧是 salvaged 修补点时，mapped 坐标作为权威边界，位移记入 `max_replacement_distance_mm`；只有 mapped-mapped 不一致或两侧都缺少 mapped 权威坐标时，差异才记入 `max_conflict_distance_mm` 并参与 PASS/WARNING/FAIL。
+
+随后建立独立共享边修补层：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
+```
+
+修补层只处理 baseline 的局部 WARNING 共享边：两侧 raw region 不能 FAIL、没有退化面、冲突必须是 1--2 个连续的 repaired-only 点且两侧都有可信锚点。程序按锚点插值、投影回原始 mesh，并同时更新两个相邻 region 的边界副本；`<sample>_edge_repair_qc.csv` 会完整记录是否修补、锚点、投影距离与拒绝原因。缺失或非有限候选坐标会写为 `non_finite_candidate`，不做自动修补。启用修补时不指定 `--out_dir` 会默认输出 `weld_repaired`，且程序拒绝覆盖 `salvaged` 基线。
+
+当前 baseline 9 样本结果为 6 PASS、2 WARNING、1 FAIL。修补后，T094_L 的 L20-L21 index 1（0.4135 mm）和 T097_L 的 L21-L29 index 23（0.3098 mm）均修补为 0；当前 `weld_repaired` 为 8 PASS/PCA_READY、1 FAIL。`T049_L` 的 L13-L17 因相邻 T003 raw FAIL 而保留 FAIL，不会自动纳入 PCA。
+
+最后只对 `weld_repaired` 中 `pca_ready=True` 的整耳做刚体对齐：
+
+```powershell
+python scripts/align_whole_ear.py --whole_ear_dir output/whole_ear_r24/weld_repaired --landmarks_dir data/landmarks --out_dir output/whole_ear_r24/aligned_weld_repaired
+```
+
+后续 W3 只读取 `aligned_weld_repaired` 中 alignment PASS 的整耳点、固定 faces 与 `alignment_qc_summary.csv`。
+
+## 11. 文档维护
 
 每次发生以下变化时，必须同步更新 README 和相关 docs：
 
@@ -233,3 +290,4 @@ T2：在 region 定义合理后，再调边界路径、patch 选择或其它参�
 4. 更新 region table。
 5. 得到新的 QC 结论。
 6. 改变 W3 前置条件或技术路线。
+7. 修改共享边修补规则、输出层或修补结果。

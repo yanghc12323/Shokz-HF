@@ -193,6 +193,23 @@ def test_make_subdivision_template_returns_stable_points_and_faces():
     np.testing.assert_allclose(template.barycentric[-1], [0.0, 1.0, 0.0])
 
 
+def test_make_barycentric_grid_is_owned_by_remesh_and_keeps_point_order():
+    grid = remesh.make_barycentric_grid(2)
+
+    assert remesh.make_barycentric_grid.__module__ == "ear_param.remesh"
+    np.testing.assert_allclose(
+        grid,
+        np.array([
+            [1.0, 0.0, 0.0],
+            [0.5, 0.0, 0.5],
+            [0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.0, 1.0, 0.0],
+        ]),
+    )
+
+
 def test_locate_uv_samples_and_map_back_to_3d(single_triangle_mesh):
     patch_vertices = single_triangle_mesh.vertices
     patch_faces = single_triangle_mesh.faces

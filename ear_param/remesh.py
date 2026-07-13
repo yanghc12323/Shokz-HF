@@ -19,7 +19,23 @@ from scipy.sparse.csgraph import dijkstra
 from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
 
-from .core import make_barycentric_grid
+
+def make_barycentric_grid(resolution: int) -> np.ndarray:
+    """Return a stable triangular barycentric grid for one region template."""
+    if resolution < 1:
+        raise ValueError(f"resolution must be >= 1, got: {resolution}")
+
+    n_points = (resolution + 1) * (resolution + 2) // 2
+    grid = np.empty((n_points, 3), dtype=float)
+    index = 0
+    inverse_resolution = 1.0 / resolution
+    for i in range(resolution + 1):
+        for j in range(resolution - i + 1):
+            lambda_b = i * inverse_resolution
+            lambda_c = j * inverse_resolution
+            grid[index] = [1.0 - lambda_b - lambda_c, lambda_b, lambda_c]
+            index += 1
+    return grid
 
 
 @dataclass(frozen=True)

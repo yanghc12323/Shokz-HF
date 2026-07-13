@@ -1,0 +1,204 @@
+# 整耳全局模板、边界焊接与刚体统一坐标系
+
+> 更新时间：2026-07-13
+> 上游输入：W2 `salvaged` 层
+> 下游交付：同拓扑、同点序、同坐标系的 whole-ear PCA 输入
+
+## 1. 为什么不能直接拼接 region PLY
+
+每个 r24 region 有 325 个点和 576 个面。直接把 15 个 region 顺序追加会得到 4875 个点和 8640 个面，但相邻 region 的共享边会各保留一份顶点。即使两份坐标非常接近，它们在拓扑上仍未连接，且不同样本不能保证通过空间距离得到相同的合并结果。
+
+当前方案不按空间距离猜测，而是利用解剖身份建立固定模板：
+
+```text
+相同 landmark 角点 -> 同一个 global_vertex_id
+相同 landmark 对组成的共享边 -> 按 edge_index=0..24 一一对应
+region 内部点 -> 保持独立
+```
+
+当前 15 区域模板共有：
+
+```text
+局部输入点数：15 * 325 = 4875
+唯一全局顶点：4453
+全局三角面：15 * 576 = 8640
+共享边：17
+```
+
+## 2. 输入与运行顺序
+
+正式输入固定为：
+
+```text
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_points.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_faces.csv
+output/parameterized_points_r24/salvaged/<sample>_L_remesh_qc.csv
+```
+
+先构建不可改写的基线整耳：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
+```
+
+再构建独立的共享边修补层：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
+```
+
+最后统一修补后整耳的坐标系：
+
+```powershell
+python scripts/align_whole_ear.py --whole_ear_dir output/whole_ear_r24/weld_repaired --landmarks_dir data/landmarks --out_dir output/whole_ear_r24/aligned_weld_repaired
+```
+
+不能颠倒顺序。刚体变换保持任意两点距离，无法修复 region 内部已经存在的边界不一致。
+
+## 3. 全局模板算法
+
+`ear_param/whole_ear.py` 读取 `region_table.csv`，为每个局部点建立 `(region_id, region_point_id)` 身份。随后使用并查集合并：
+
+1. 所有使用相同 landmark 的三角形角点。
+2. 两个 region 共享同一 landmark 对时，对应边上的 25 个点。
+3. 边方向由按名称排序后的 `lm_start -> lm_end` 统一，局部方向相反时自动反向对应。
+
+模板会拒绝以下输入：
+
+- region_id 重复或一个 region 使用重复 landmark；
+- 一条边被三个以上 region 使用；
+- 共享边两侧 resolution 不同；
+- 共享边缺少 `resolution + 1` 个模板点。
+
+全局模板只定义身份和连接关系，不包含任何样本坐标，因此所有样本共用完全相同的点序和拓扑。
+
+## 4. 坐标选择原则
+
+同一个 global vertex 可能收到多个 region 坐标。程序不做盲目平均。普通共享边点按以下可追溯顺序选择：
+
+```text
+原始 mapped
+landmark_vertex
+smooth_near_vertex
+smooth_internal
+其它来源
+```
+
+全局解剖角点有一条例外：如果候选点的 `topology_role=landmark` 且 `repair_method=landmark_vertex`，它表示已吸附到该解剖特征点的原始 mesh 顶点，因此优先于普通 mapped 候选。这个例外只作用于三角形角点，不改变共享边内部点的选择规则。
+
+同等级候选按 `region_id + region_point_id` 固定排序，保证重复运行结果一致。所有相邻 region 的 face 最终引用同一个 global vertex，因此导出的 PLY 在拓扑上真正焊接。
+
+## 5. 为什么区分 replacement 和 conflict
+
+真实数据表明，共享点两侧同为原始 mapped 时，最大差异约为 `1e-14 mm`，说明共享边点序和最短路径是一致的。较大的 pre-weld 距离主要来自一侧 mapped、另一侧 salvaged 插值。
+
+因此 QC 分为：
+
+- `max_replacement_distance_mm`：一侧 mapped、一侧修补时，使用 mapped 边界替换修补边界所需的最大位移。它反映修补量，不代表两条可靠边界冲突。
+- `max_conflict_distance_mm`：两侧都 mapped，或两侧都没有 mapped 权威坐标时的最大差异。该值决定 edge PASS/WARNING/FAIL。
+- `unresolved_point_count`：两侧都没有 mapped 权威坐标的共享点数量。
+- `replacement_point_count`：由 mapped 一侧为修补一侧提供边界坐标的点数。
+
+默认阈值：
+
+```text
+max_conflict <= 0.25 mm: PASS
+0.25 mm < max_conflict <= 1.00 mm: WARNING
+max_conflict > 1.00 mm: FAIL
+```
+
+样本必须满足 15 个 salvaged region 均 PASS、每区 local faces 与 r24 标准细分模板逐面一致、无缺失/非有限全局点、无退化或重复全局面、17 条共享边全部 PASS，才会标记 `pca_ready=True`。`invalid_region_face_count` 记录局部面数量、face_id 或顶点连接不符合标准模板的 region 数量，正式输入必须为 0。
+
+## 6. 焊接输出
+
+```text
+output/whole_ear_r24/salvaged/global_template_manifest.csv
+output/whole_ear_r24/salvaged/global_template_edges.csv
+output/whole_ear_r24/salvaged/global_template_edge_members.csv
+output/whole_ear_r24/salvaged/<sample>_whole_ear_points.csv
+output/whole_ear_r24/salvaged/<sample>_whole_ear_faces.csv
+output/whole_ear_r24/salvaged/<sample>_whole_ear_welded.ply
+output/whole_ear_r24/salvaged/<sample>_weld_qc_edges.csv
+output/whole_ear_r24/salvaged/<sample>_weld_qc_vertices.csv
+output/whole_ear_r24/salvaged/<sample>_weld_qc_summary.csv
+output/whole_ear_r24/salvaged/<sample>_weld_qc.png
+output/whole_ear_r24/salvaged/whole_ear_weld_summary.csv
+```
+
+`whole_ear_points.csv` 必须按 `global_vertex_id` 排序后使用。`whole_ear_faces.csv` 中的 `global_v0/v1/v2` 已直接引用该全局点序。
+
+## 7. 共享边耦合修补层
+
+`weld_repaired` 不改写 `salvaged` 基线。它只对 baseline 为 WARNING 的共享边尝试修补：冲突点必须是双方均为修补来源的连续 1 至 2 个点；相邻 region 的 `raw_status` 必须均为 PASS/WARNING，且无退化面；修补点两侧必须存在 raw mapped 或 `landmark_vertex` 锚点。
+
+每个修补点先按两锚点在共享边上的 index 位置插值，再投影至同一样本的原始 mesh 表面，并同时写入两个相邻 region 的对应点。修补后重新计算整条边；若最大 conflict 仍大于 0.25 mm，则恢复该边原坐标并拒绝修补。
+
+```text
+output/whole_ear_r24/weld_repaired/<sample>_edge_repair_qc.csv
+```
+
+该文件记录 `pre_distance_mm`、`post_distance_mm`、`left_anchor_index`、`right_anchor_index`、`projection_distance_mm`、`repair_method`、`applied` 与 `rejection_reason`。若共享边候选坐标缺失或非有限，程序会输出 `non_finite_candidate` 审计记录（距离字段为 NaN），不会尝试修补或静默跳过。QC 图中青色点为成功修补点，紫色点为被拒绝的候选点；标题同时显示 raw 和 final weld 状态。
+
+自动修补不会放行 raw FAIL 相邻边。例如 T049_L 的 L13-L17 因邻接 T003 raw FAIL，被标记为 `adjacent_raw_fail` 并维持 FAIL。
+
+## 8. 刚体统一坐标系
+
+`ear_param/alignment.py` 使用 `L7、L13、L15、L26`。当前 9 个左耳样本均包含这四个点。Kabsch 求解：
+
+```text
+min Σ ||R P_i + t - Q_i||²
+R^T R = I, det(R) = +1
+```
+
+只允许旋转和平移，不允许 scale、ICP 或 non-rigid deformation。Generalized Procrustes 先对齐到临时参考样本，再计算平均 landmarks 并迭代更新目标。最终同一个 `R,t` 同时作用于该样本的全部 4453 个 whole-ear 顶点。
+
+当前全部是左耳，不执行镜像。未来混合左右耳时，必须在 Kabsch 前增加独立、明确的侧别标准化流程。
+
+## 9. 对齐输出与 QC
+
+```text
+output/whole_ear_r24/aligned_weld_repaired/generalized_procrustes_reference_landmarks.csv
+output/whole_ear_r24/aligned_weld_repaired/rigid_transforms.csv
+output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
+output/whole_ear_r24/aligned_weld_repaired/alignment_qc_overlay.png
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear.ply
+```
+
+对齐 QC 包含：
+
+- `det_rotation`：应接近 +1；
+- `rms/max_landmark_residual_mm`：表示刚体对齐后仍保留的真实 landmark 形态差异；
+- `max_mesh_edge_distance_error_mm`：对齐前后所有 mesh 边长的最大变化，应接近数值零；
+- `gpa_converged` 和 `gpa_final_delta`：记录迭代是否收敛；只有 `gpa_converged=True`、`det_rotation` 接近 +1 且边长保持误差接近 0，alignment 才标记 PASS。
+
+landmark 残差不应被强制压到零，因为不同人的真实耳朵形态和尺寸不同。对齐 summary 的 `input_layer` 必须是非空且全批次一致的值，防止把 baseline 与 repaired 整耳混合。当前 8 个对齐样本的 `det(R)=1`，最大 mesh 边长保持误差约 `1.84e-14 mm`。
+
+## 10. 当前真实结果
+
+| 样本 | Weld 状态 | PCA_READY | 结论 |
+|---|---:|---:|---|
+| T013_L | PASS | 是 | 基线 PASS，已对齐 |
+| T049_L | FAIL | 否 | L13-L17 邻接 T003 raw FAIL，`adjacent_raw_fail` |
+| T076_L | PASS | 是 | 基线 PASS，已对齐 |
+| T077_L | PASS | 是 | 基线 PASS，已对齐 |
+| T078_L | PASS | 是 | 基线 PASS，已对齐 |
+| T088_L | PASS | 是 | 基线 PASS，已对齐 |
+| T094_L | PASS | 是 | L20-L21 index 1：0.4135 mm -> 0，已投影修补 |
+| T097_L | PASS | 是 | L21-L29 index 23：0.3098 mm -> 0，已投影修补 |
+| T099_L | PASS | 是 | 基线 PASS，已对齐 |
+
+当前 8 个样本可以用于 W3 代码实现和流程验证，但样本量仍不足以代表稳定总体形态分布。T049_L 仍应优先回到对应共享边的 landmark、salvage 来源或 M 点约束诊断，不应通过放宽阈值自动纳入。
+
+## 11. W3 输入契约
+
+后续整体 PCA 只读取：
+
+```text
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
+output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
+```
+
+所有样本必须具有完全相同的 `global_vertex_id` 序列与 `global_v0/v1/v2` faces。每个样本按全局点序展开为长度 `4453 * 3 = 13359` 的向量，再堆叠进入 PCA。

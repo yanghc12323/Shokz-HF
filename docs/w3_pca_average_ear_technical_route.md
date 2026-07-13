@@ -1,238 +1,120 @@
-﻿# W3 PCA 平均耳技术路线说明
+# W3 PCA 与平均耳技术路线
 
-> 面向对象：后续接手本项目的 AI 或工程师  
-> 更新时间：2026-07-10  
-> 上游输入：W2 patch-based remesh 合格输出  
-> 当前状态：W3 尚未正式实现；W2 主线已切换到 resolution=24，并引入 raw/repaired 两层输出
+> 面向对象：后续接手项目的 AI 或工程师
+> 更新时间：2026-07-13
+> 当前状态：整耳全局模板、焊接 QC、共享边耦合修补和刚体统一坐标系已实现；PCA 尚未实现
 
-## 1. 一句话背景
+## 1. 当前上游状态
 
-本项目的目标是把不同人的 3D 耳模型转换成同拓扑、同点序、同 region 定义的 remesh 表达，然后在这个统一表达上做统计形态分析。W2 已经实现：根据 landmark 划分三角区域，将局部 3D patch 参数化到标准 2D 三角域，固定采样点数量，再映射回 3D，并输出 remesh points、faces、QC 和 landmark 几何特征。
-
-W3 的任务是：对所有合格模型进行 PCA，选取累计解释方差达到 75% 的主成分，计算平均形态，并使用 W2 的固定 template faces 生成平均 patch / 平均耳。
-
-## 2. 当前 W2 状态对 W3 的影响
-
-当前有效真实样本：
+W2 已将每个样本划分为 15 个三角 region，每区在 resolution=24 下固定为 325 点和 576 面。正式下游采用 `salvaged` 层，并已进一步完成：
 
 ```text
-T013_L
-T076_L
-T077_L
-T078_L
+15 个 region salvaged 输出
+-> 全局模板合并共享角点和共享边
+-> 4453 个唯一整耳顶点、8640 个固定面
+-> 边界焊接 QC
+-> L7/L13/L15/L26 刚体 Generalized Procrustes
+-> aligned whole-ear PCA 输入
 ```
 
-历史 r8 13 区域 QC 可视化结果：
+当前 whole-ear QC 分为不可改写的 baseline 与正式修补层：
 
 ```text
-T013_L: PASS=2, WARNING=10, FAIL=1
-T076_L: PASS=2, WARNING=11, FAIL=0
-T077_L: PASS=3, WARNING=10, FAIL=0
-T078_L: PASS=3, WARNING=9,  FAIL=1
-共同 PASS region: 0
+baseline salvaged: 6 PASS, 2 WARNING (T094_L, T097_L), 1 FAIL (T049_L)
+weld_repaired PCA_READY:
+T013_L, T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
+FAIL: T049_L
 ```
 
-因此当前不建议立刻做正式 W3 PCA。原因是 W3 的 PCA 矩阵要求同一个 `region_id` 在多个样本中都有完整、无 NaN、同点序的 3D 坐标。更新 T009 region table 后，T009 已不再 FAIL，但 raw 层仍没有四样本共同 PASS region，强行做 PCA 会导致输入不足或需要错误地填补 NaN。
+`T094_L` 和 `T097_L` 仅在满足保守条件时由共享边锚点插值并投影回原始 mesh，分别把单点冲突从 0.4135 mm 和 0.3098 mm 修补为 0。`T049_L` 因相邻 T003 的 raw region FAIL 而被明确拒绝自动修补。当前 8 个 PCA_READY 样本已完成对齐。所有 `det(R)=1`，最大 mesh 边长保持误差约 `1.84e-14 mm`。这批数据可以用于实现和验证 PCA 流程，但样本量较小，暂不能代表稳定总体分布。
 
-当前 r24 已在四个真实样本上完成验证：
+## 2. W3 唯一正式输入
+
+W3 不再读取原始高密度 PLY，不重新寻找 landmark，也不重新 remesh、repair、salvage 或焊接。正式输入为：
 
 ```text
-raw:
-T013_L: PASS=2, WARNING=11, FAIL=0
-T076_L: PASS=1, WARNING=11, FAIL=1
-T077_L: PASS=1, WARNING=12, FAIL=0
-T078_L: PASS=2, WARNING=11, FAIL=0
-
-repaired:
-T013_L: PASS=13, WARNING=0, FAIL=0
-T076_L: PASS=12, WARNING=0, FAIL=1
-T077_L: PASS=13, WARNING=0, FAIL=0
-T078_L: PASS=13, WARNING=0, FAIL=0
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
+output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
+output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
 ```
 
-r24 repaired 输出适合用于补齐 PLY 可视化。T009 新组合 `L18-L29-L30` 已在四样本 repaired 层全部 PASS；当前唯一剩余 FAIL 是 `T076_L / T008`。是否进入 W3 PCA，需要后续明确采用 raw PASS-only 还是 repaired exportable 数据。默认更保守的 W3 方案仍使用 raw PASS-only。
-
-当前正确顺序是：
+同时回查：
 
 ```text
-T0：继续用真实样本验证 region table。
-T1：调整 region table，找到多个样本共同 PASS 的候选 region。
-T2：必要时再调整边界路径、patch 选择或参数。
-W3：只对共同 PASS 的 region 做 PCA。
+output/whole_ear_r24/weld_repaired/<sample>_weld_qc_summary.csv
+output/whole_ear_r24/weld_repaired/<sample>_edge_repair_qc.csv
 ```
 
-## 3. W3 输入契约
-
-W3 不读取原始高密度 mesh，不重新找 landmark，不重新做 harmonic parameterization。W3 的可信输入只能来自 W2 输出：
+样本准入条件：
 
 ```text
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
+weld_repaired pca_ready == True
+alignment input_layer == weld_repaired
+alignment status == PASS
+global_vertex_id 完整且唯一
+x/y/z 全部有限
+所有样本 global_vertex_id 序列完全相同
+所有样本 global_v0/v1/v2 faces 完全相同
 ```
 
-可选读取：
+baseline 的 WARNING/FAIL 不通过放宽阈值自动进入 PCA。只有带有 `edge_repair_qc.csv` 审计记录、修补后整耳重新判为 PASS 的样本，才能从独立 `weld_repaired` 层进入 PCA。
+
+## 3. PCA 数据矩阵
+
+每个合格样本必须先按 `global_vertex_id` 升序排列：
+
+```python
+xyz = points[["x", "y", "z"]].to_numpy(dtype=float)  # (4453, 3)
+vector = xyz.reshape(-1)                                # (13359,)
+```
+
+将 N 个样本堆叠：
 
 ```text
-output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
+X.shape = (N, 13359)
 ```
 
-`region_features` 用于解释 landmark 尺寸、角度、面积差异，不是 PCA 坐标矩阵的必需输入。
+不能依赖 CSV 原始行顺序，也不能重新生成 faces。
 
-## 4. 合格 region 判定
+## 4. PCA 计算
 
-W3 只能使用满足以下条件的 region：
-
-```text
-status == "PASS"
-sample_point_count == expected_point_count
-unmapped_count == 0
-degenerate_faces == 0
-x/y/z 不含 NaN 或 Inf
-```
-
-不要把 `WARNING` 或 `FAIL` region 的 NaN 坐标填补后做 PCA。这样会把 W2 的边界失败混入 W3 的形态统计结果。
-
-## 5. points CSV 必要字段
-
-`*_remesh_points.csv` 必须包含：
-
-```text
-point_id
-sample_id
-side
-region_id
-region_name
-region_point_id
-lambda_a
-lambda_b
-lambda_c
-u
-v
-source_face_index
-is_unmapped
-x
-y
-z
-```
-
-关键对齐字段：
-
-```text
-region_id
-region_point_id
-```
-
-W3 必须按 `region_point_id` 显式排序，不能依赖 CSV 原始行顺序。
-
-## 6. faces CSV 必要字段
-
-`*_remesh_faces.csv` 必须包含：
-
-```text
-sample_id
-side
-region_id
-region_name
-face_id
-local_v0
-local_v1
-local_v2
-global_v0
-global_v1
-global_v2
-```
-
-W3 生成平均 patch 时必须使用 W2 输出的 fixed template faces，不要重新 triangulate。
-
-## 7. 推荐数据组织方式
-
-建议先按 region 独立做 PCA：
-
-1. 读取所有样本的 W2 输出。
-2. 根据 QC 找出每个 region 的合格样本。
-3. 只保留至少 2 个合格样本的 region。
-4. 对每个 region，按 `region_point_id` 排序。
-5. 将每个样本的 `(P, 3)` 坐标展平为 `(P*3,)`。
-6. 堆叠成 `X.shape == (N, P*3)`。
-7. 对该 region 独立做 PCA。
-8. 输出该 region 的平均 patch。
-9. 最后再拼接多个平均 patch，得到平均耳雏形。
-
-暂不建议一开始就把所有 region 拼成整耳 PCA。原因是不同 region 的 QC 状态可能不同，按 region 做更容易定位问题。
-
-## 8. PCA 算法路线
-
-输入：
-
-```text
-X.shape == (N, D)
-D = P * 3
-```
-
-步骤：
+建议使用 NumPy SVD，避免增加 scikit-learn 依赖：
 
 ```python
 mean_vector = X.mean(axis=0)
 X_centered = X - mean_vector
-U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
-explained_variance = (S ** 2) / (N - 1)
-explained_variance_ratio = explained_variance / explained_variance.sum()
-cumulative = np.cumsum(explained_variance_ratio)
-n_components_75 = int(np.searchsorted(cumulative, 0.75) + 1)
+U, singular_values, Vt = np.linalg.svd(X_centered, full_matrices=False)
+explained_variance = singular_values**2 / (N - 1)
+explained_ratio = explained_variance / explained_variance.sum()
+cumulative_ratio = np.cumsum(explained_ratio)
+n_components_75 = int(np.searchsorted(cumulative_ratio, 0.75) + 1)
 components = Vt[:n_components_75]
+scores = X_centered @ components.T
 ```
 
-当前建议优先使用 `numpy.linalg.svd`，避免新增 `scikit-learn` 依赖。
+`n_components_75` 是累计解释方差第一次达到或超过 75% 时的主成分数。由于当前 N=8，最多只能得到 N-1=7 个非零主成分，结果主要用于流程验证。
 
-## 9. 样本数量限制
+## 5. 平均耳
 
-真正 PCA 至少需要：
-
-```text
-N >= 2
-```
-
-如果某个 region 只有 1 个合格样本：
-
-1. 不计算 PCA。
-2. 可以输出该 region 的均值点作为流程验证。
-3. `pca_summary.csv` 中标记为 `INSUFFICIENT_SAMPLES`。
-
-如果某个 region 没有合格样本：
-
-1. 不输出平均 patch。
-2. `pca_summary.csv` 中标记为 `NO_PASS_SAMPLES`。
-
-## 10. 平均 patch 生成
-
-对每个 region：
+平均耳坐标直接来自：
 
 ```python
-mean_points = mean_vector.reshape(P, 3)
-faces = faces_df[["local_v0", "local_v1", "local_v2"]].to_numpy(dtype=int)
-mesh = trimesh.Trimesh(vertices=mean_points, faces=faces, process=False)
+mean_points = mean_vector.reshape(4453, 3)
 ```
 
-faces 必须来自 W2 的 remesh faces。不要重新 Delaunay，不要重新 remesh。
+faces 必须复制任一合格样本的固定 `global_v0/v1/v2`，并在运行前验证所有样本 faces 完全一致：
 
-## 11. 平均耳生成
+```python
+mesh = trimesh.Trimesh(
+    vertices=mean_points,
+    faces=global_faces,
+    process=False,
+)
+```
 
-第一版可以直接把多个平均 patch 拼接：
+这里不再按 region 拼接，也不再焊接；这些工作已经在上游完成。
 
-1. 每个 region 生成一组 `mean_points`。
-2. 每个 region 的 faces 加上顶点 offset。
-3. 合并 vertices 和 faces。
-4. 导出 `average_ear.ply`。
-
-注意：相邻 region 的边界点可能重复。第一版可以接受重复边界点，因为 W3 的核心目标是统计对齐，不是生成生产级 watertight mesh。
-
-## 12. 建议新增文件
-
-W3 实现时建议新增：
+## 6. 建议实现文件
 
 ```text
 ear_param/pca_average.py
@@ -240,79 +122,66 @@ scripts/build_average_ear.py
 tests/test_pca_average.py
 ```
 
-建议输出目录：
-
-```text
-output/pca_average/
-```
-
 建议命令：
 
 ```powershell
-python scripts/build_average_ear.py --points_dir output/parameterized_points --out_dir output/pca_average
+python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_weld_repaired --out_dir output/pca_average --variance_threshold 0.75
 ```
 
-## 13. 建议输出文件
+## 7. 建议输出
 
 ```text
 output/pca_average/pca_summary.csv
-output/pca_average/<region_id>_mean_points.csv
-output/pca_average/<region_id>_pca_components.csv
-output/pca_average/<region_id>_explained_variance.csv
-output/pca_average/<region_id>_mean_patch.ply
-output/pca_average/average_ear.ply
-output/pca_average/average_ear_points.csv
-output/pca_average/average_ear_faces.csv
+output/pca_average/sample_manifest.csv
+output/pca_average/mean_whole_ear_points.csv
+output/pca_average/mean_whole_ear_faces.csv
+output/pca_average/mean_whole_ear.ply
+output/pca_average/components.npy
+output/pca_average/scores.csv
+output/pca_average/explained_variance.csv
+output/pca_average/pc_modes/<pc>_minus_2sd.ply
+output/pca_average/pc_modes/<pc>_plus_2sd.ply
 ```
 
-`pca_summary.csv` 建议字段：
+`pca_summary.csv` 至少记录：样本数、顶点数、维度数、75% 主成分数、实际累计解释方差、输入样本列表和状态。
 
-```text
-region_id
-n_samples
-n_points
-n_dimensions
-n_components_75
-explained_variance_75
-status
-message
-```
+## 8. 实现步骤
 
-## 14. 测试计划
+1. 读取 `alignment_qc_summary.csv`，筛选 alignment PASS。
+2. 回查每个样本 weld `pca_ready=True`。
+3. 验证所有点序、顶点数和 faces 完全一致。
+4. 构建 `X.shape=(N, 13359)`。
+5. 计算均值、中心化矩阵和 SVD。
+6. 选取累计解释方差达到 75% 的最小主成分数。
+7. 输出 components、scores 和解释方差。
+8. 将平均向量 reshape 为 `(4453,3)`，使用固定 faces 导出平均耳。
+9. 输出各主成分 `mean +/- 2SD` 模式 PLY，检查变化是否为真实形态而非整体姿态。
+
+## 9. 测试要求
 
 `tests/test_pca_average.py` 至少覆盖：
 
-1. `run_pca_75` 能正确选择累计解释方差 >= 75% 的主成分数。
-2. 单 region points CSV 能构造成正确形状矩阵。
-3. 点序按 `region_point_id` 排序。
-4. QC 不合格样本被剔除。
-5. 只有 1 个合格样本时返回 `INSUFFICIENT_SAMPLES`。
-6. mean vector reshape 后得到 `(P, 3)`。
-7. 平均 patch mesh 使用 W2 fixed template faces。
-8. 不依赖真实大 mesh，用小型合成 CSV 做单元测试。
+1. 点 CSV 被显式按 `global_vertex_id` 排序。
+2. 顶点缺失、重复、NaN/Inf 时拒绝输入。
+3. 不同样本 faces 不一致时拒绝输入。
+4. 非 PCA_READY、局部标准面不完整、GPA 未收敛或 alignment FAIL 样本被排除。
+5. 已知矩阵能够正确选择累计解释方差 75% 的主成分数。
+6. 中心化后的各维均值接近零。
+7. mean vector 正确恢复为 `(V,3)`。
+8. 平均耳 faces 与 whole-ear 固定模板完全一致。
+9. 单样本时返回 `INSUFFICIENT_SAMPLES`，不伪造 PCA。
+10. SVD 重构和 score 维度正确。
 
-## 15. 常见错误
+## 10. 统计与解释注意事项
 
-### 错误 1：把 WARNING/FAIL region 填 NaN 后做 PCA
+- 当前 8 个样本只适合验证代码和初步观察，正式统计结论需要更多合格样本。
+- 刚体对齐没有缩放，因此 PCA 会保留真实尺寸差异，符合人因尺寸分析目标。
+- landmark 对齐残差不应强制为零；它包含真实个体形态差异。
+- 不要在 PCA 阶段对 WARNING/FAIL 样本做插值，也不要重新焊接。
+- PC1 若主要表现为整体平移或旋转，应回查对齐流程；若表现为局部断裂，应回查 weld QC 和全局点序。
 
-禁止。必须先按 QC 剔除不合格样本。
+## 11. 相关文档
 
-### 错误 2：忘记按 `region_point_id` 排序
-
-会导致不同样本的点错位，PCA 结果无意义。
-
-### 错误 3：把单样本结果当 PCA
-
-单样本只能得到均值，不能得到可靠主成分。
-
-### 错误 4：重新生成 faces
-
-W3 不应重新 remesh 或重新 triangulate。faces 必须来自 W2 的 `*_remesh_faces.csv`。
-
-### 错误 5：忽略 W2 QC 可视化结论
-
-如果某个 region 在 W2 中 patch/UV 覆盖不足，应先修 region table 或边界策略，而不是在 W3 中补救。
-
-## 16. 当前结论
-
-W3 技术路线已经明确，但当前四样本还不满足正式 PCA 的前置条件。下一步应先完成 W2 的 T0/T1/T2：继续验证、调整 region table、再考虑算法参数。等多个样本在同一 region 上同时 PASS 后，再实现并运行 W3。
+- `docs/remesh_usage_w2.md`：W2 remesh 与 salvaged 输出。
+- `docs/whole_ear_weld_and_alignment.md`：全局模板、焊接 QC、Kabsch/GPA 的实现与字段。
+- `README.md`：当前命令、样本状态和主线入口。

@@ -176,24 +176,41 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --re
 2. 对 unmapped 点强行插值后进入 PCA。
 3. 在当前失败状态下提高 `resolution`。
 
-## 10. W3 候选 Region 标准
+## 10. 整耳焊接 QC 与 W3 准入
 
-一个 region 进入 W3 候选池的最低标准：
+当前 W3 不再按独立 region 直接拼接。15 个 salvaged region 会先通过全局模板构成固定 whole-ear，再做共享边 QC。先建立不可改写的 baseline：
 
-```text
-所有目标样本该 region 均 status == PASS
-所有目标样本 unmapped_count == 0
-所有目标样本 degenerate_faces == 0
-所有目标样本 sample_point_count == expected_point_count
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
 ```
 
-短期目标：
+baseline 的整耳进入共享边修补评估前，必须满足：
 
 ```text
-先找到 3-5 个 region，在多个真实样本上全部 PASS。
+15 个 salvaged region 均 PASS
+4453 个全局顶点完整且有限
+8640 个全局面无退化、无重复
+17 条共享边 weld status 均 PASS
+weld summary 中 pca_ready == True
 ```
 
-这些 region 可以作为 W3 第一版 PCA 的输入。
+焊接 QC 必须区分 `replacement` 与 `conflict`：mapped 边界替换 salvaged 插值边界属于可追溯修正；两侧都没有 mapped 权威点且彼此差异较大才属于未解决冲突。当前重点诊断：
+
+```text
+T049_L / L13-L17: FAIL, max_conflict=2.1694 mm
+T094_L / L20-L21: WARNING, max_conflict=0.4135 mm
+T097_L / L21-L29: WARNING, max_conflict=0.3098 mm
+```
+
+对 baseline 的 WARNING，只允许在两侧 raw region 非 FAIL、无退化面、冲突为 1--2 个连续 repaired-only 点且两侧存在可信锚点时做共享边耦合修补。修补点通过锚点插值后投影回原始 mesh，并同步写入两侧 region 的对应边界点。运行：
+
+```powershell
+python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
+```
+
+T094_L 与 T097_L 分别完成一个满足条件的单点修补，修补后冲突均为 0，`weld_repaired` 层由 6 PASS、2 WARNING、1 FAIL 变为 8 PASS/PCA_READY、1 FAIL。`T049_L` 仍因 L13-L17 相邻 raw FAIL 而被拒绝自动修补。请同时查看 `<sample>_edge_repair_qc.csv` 和 weld QC 图：青色点表示已成功修补，紫色点表示被拒绝的候选点。
+
+最终只有 `weld_repaired` 中 `pca_ready=True` 且 `aligned_weld_repaired/alignment_qc_summary.csv` 为 PASS 的样本进入 W3。当前共有 8 个样本已完成刚体对齐。详细字段见 `docs/whole_ear_weld_and_alignment.md`。
 
 ## 11. 文档维护
 
@@ -204,3 +221,4 @@ python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --re
 3. QC 结果发生明显变化。
 4. 新增或修改可视化/诊断脚本。
 5. W3 候选 region 发生变化。
+6. 共享边修补规则、修补审计或整耳候选样本发生变化。

@@ -37,6 +37,42 @@ def _expected_point_count(resolution: int) -> int:
     return (resolution + 1) * (resolution + 2) // 2
 
 
+def build_sample_status_summary(qc_dir: Path) -> pd.DataFrame:
+    """Build PASS/WARNING/FAIL counts for every sample QC file in a directory."""
+    records: list[dict[str, object]] = []
+    for qc_path in sorted(Path(qc_dir).glob("*_remesh_qc.csv")):
+        qc_df = pd.read_csv(qc_path)
+        if qc_df.empty or "status" not in qc_df.columns:
+            continue
+        sample_tag = _sample_tag_from_qc(qc_path, qc_df)
+        counts = qc_df["status"].value_counts()
+        records.append({
+            "sample_tag": sample_tag,
+            "PASS": int(counts.get("PASS", 0)),
+            "WARNING": int(counts.get("WARNING", 0)),
+            "FAIL": int(counts.get("FAIL", 0)),
+            "TOTAL": int(len(qc_df)),
+        })
+    return pd.DataFrame(records, columns=["sample_tag", "PASS", "WARNING", "FAIL", "TOTAL"])
+
+
+def _sample_tag_from_qc(qc_path: Path, qc_df: pd.DataFrame) -> str:
+    if {"sample_id", "side"}.issubset(qc_df.columns) and not qc_df.empty:
+        sample_id = str(qc_df["sample_id"].iloc[0])
+        side = str(qc_df["side"].iloc[0])
+        return f"{sample_id}_{side}"
+    return qc_path.name.replace("_remesh_qc.csv", "")
+
+
+def _print_sample_status_summary(label: str, qc_dir: Path) -> None:
+    summary = build_sample_status_summary(qc_dir)
+    print(f"\n[Remesh] {label} sample summary:")
+    if summary.empty:
+        print("  (no QC files found)")
+        return
+    print(summary.to_string(index=False))
+
+
 def main() -> None:
     import argparse
 
@@ -490,6 +526,9 @@ Example:
         "[Remesh] Salvaged Done: "
         f"PASS={salvaged_pass_c} WARNING={salvaged_warn_c} FAIL={salvaged_fail_c}"
     )
+    _print_sample_status_summary("Raw", out_dir)
+    _print_sample_status_summary("Repaired", repaired_out_dir)
+    _print_sample_status_summary("Salvaged", salvaged_out_dir)
 
 
 if __name__ == "__main__":

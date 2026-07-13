@@ -1,0 +1,1 @@
+sample_id,side,edge_id,edge_index,regions,raw_edge_status,pre_distance_mm,post_distance_mm,eligible,applied,rejection_reason,left_anchor_index,right_anchor_index,projection_distance_mm,repair_method
