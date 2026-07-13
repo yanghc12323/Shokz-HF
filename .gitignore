@@ -27,6 +27,10 @@ output/logs/
 output/figures/
 output/remesh/
 output/remesh_r24/
+data/clean_mesh/
+.agents/
+.planning/
+.test_artifacts/
 
 # Project-specific: reference documents and binaries
 *.pdf
