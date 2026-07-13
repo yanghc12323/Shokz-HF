@@ -1,2 +1,0 @@
-sample_id,side,edge_id,edge_index,regions,raw_edge_status,pre_distance_mm,post_distance_mm,eligible,applied,rejection_reason,left_anchor_index,right_anchor_index,projection_distance_mm,repair_method
-T097,L,L21__L29,23,T012;T015,WARNING,0.30979996024449946,0.0,True,True,,22,24,0.007166999184810903,edge_coupled_interpolation
