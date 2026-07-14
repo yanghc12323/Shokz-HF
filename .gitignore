@@ -23,10 +23,7 @@ Thumbs.db
 script_output.txt
 
 # Project-specific: generated output (kept locally, not in repo)
-output/logs/
-output/figures/
-output/remesh/
-output/remesh_r24/
+output/
 data/clean_mesh/
 .agents/
 .planning/

@@ -18,7 +18,11 @@ import numpy as np
 import pandas as pd
 import trimesh
 
-from ear_param.alignment import apply_rigid_transform, generalized_procrustes
+from ear_param.alignment import (
+    apply_rigid_transform,
+    fixed_reference_alignment,
+    generalized_procrustes,
+)
 
 
 DEFAULT_LANDMARKS = ("L7", "L13", "L15", "L26")
@@ -34,9 +38,12 @@ def main() -> None:
     parser.add_argument("--landmarks_dir", default="data/landmarks")
     parser.add_argument("--out_dir", default="output/whole_ear_r24/aligned")
     parser.add_argument("--alignment_landmarks", nargs="+", default=list(DEFAULT_LANDMARKS))
-    parser.add_argument("--reference_sample", help="Optional initial reference sample tag.")
+    parser.add_argument("--alignment_mode", choices=("gpa", "fixed_reference"), default="gpa")
+    parser.add_argument("--reference_sample", help="Required fixed target for fixed_reference; optional initial target for GPA.")
     parser.add_argument("--tolerance", type=float, default=1e-8)
     parser.add_argument("--max_iterations", type=int, default=20)
+    parser.add_argument("--samples", nargs="+", help="Optional PCA-ready sample tags to align.")
+    parser.add_argument("--canonical_side", choices=("L", "R"))
     args = parser.parse_args()
 
     whole_dir = Path(args.whole_ear_dir)
@@ -44,7 +51,7 @@ def main() -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    sample_tags = _discover_pca_ready_samples(whole_dir)
+    sample_tags = args.samples or _discover_pca_ready_samples(whole_dir)
     if len(sample_tags) < 2:
         raise SystemExit("At least two PCA_READY whole-ear samples are required for alignment.")
     input_layers = {
@@ -54,7 +61,7 @@ def main() -> None:
     if len(input_layers) != 1:
         raise SystemExit("All aligned samples must come from one whole-ear input layer.")
     input_layer = input_layers.pop()
-    sides = {sample_tag.rsplit("_", 1)[-1] for sample_tag in sample_tags}
+    sides = {args.canonical_side} if args.canonical_side else {sample_tag.rsplit("_", 1)[-1] for sample_tag in sample_tags}
     if len(sides) != 1:
         raise SystemExit("Mixed left/right samples require an explicit mirror-normalization stage.")
 
@@ -65,19 +72,43 @@ def main() -> None:
         )
         for sample_tag in sample_tags
     }
-    result = generalized_procrustes(
-        landmark_sets,
-        reference_sample=args.reference_sample,
-        tolerance=args.tolerance,
-        max_iterations=args.max_iterations,
-    )
+    if args.alignment_mode == "fixed_reference":
+        if not args.reference_sample:
+            raise SystemExit("fixed_reference alignment requires --reference_sample")
+        if args.reference_sample not in landmark_sets:
+            raise SystemExit("reference_sample must be among the selected PCA-ready samples")
+        result = fixed_reference_alignment(
+            landmark_sets,
+            reference_sample=args.reference_sample,
+        )
+        target_landmarks = result.reference_landmarks
+        target_filename = "fixed_reference_landmarks.csv"
+        target_label = f"Reference: {args.reference_sample}"
+        iterations, converged, final_delta = 1, True, 0.0
+        reference_sample = args.reference_sample
+    else:
+        result = generalized_procrustes(
+            landmark_sets,
+            reference_sample=args.reference_sample,
+            tolerance=args.tolerance,
+            max_iterations=args.max_iterations,
+        )
+        target_landmarks = result.mean_landmarks
+        target_filename = "generalized_procrustes_reference_landmarks.csv"
+        target_label = "GPA mean"
+        iterations, converged, final_delta = (
+            result.iterations,
+            result.converged,
+            result.final_delta,
+        )
+        reference_sample = ""
 
     pd.DataFrame({
         "landmark_id": landmark_ids,
-        "x": result.mean_landmarks[:, 0],
-        "y": result.mean_landmarks[:, 1],
-        "z": result.mean_landmarks[:, 2],
-    }).to_csv(out_dir / "generalized_procrustes_reference_landmarks.csv", index=False)
+        "x": target_landmarks[:, 0],
+        "y": target_landmarks[:, 1],
+        "z": target_landmarks[:, 2],
+    }).to_csv(out_dir / target_filename, index=False)
 
     expected_vertex_ids: np.ndarray | None = None
     expected_faces: np.ndarray | None = None
@@ -109,26 +140,34 @@ def main() -> None:
             out_dir / f"{sample_tag}_aligned_whole_ear_points.csv", index=False
         )
         faces.to_csv(out_dir / f"{sample_tag}_aligned_whole_ear_faces.csv", index=False)
-        trimesh.Trimesh(vertices=aligned_xyz, faces=face_values, process=False).export(
-            out_dir / f"{sample_tag}_aligned_whole_ear.ply"
+        aligned_mesh = trimesh.Trimesh(
+            vertices=aligned_xyz,
+            faces=face_values,
+            process=False,
         )
+        aligned_mesh.export(out_dir / f"{sample_tag}_aligned_whole_ear.ply")
+        if args.alignment_mode == "fixed_reference":
+            aligned_mesh.export(out_dir / f"{sample_tag}_aligned_whole_ear.obj")
+            aligned_mesh.export(out_dir / f"{sample_tag}_aligned_whole_ear.stl")
         aligned_for_plot[sample_tag] = aligned_xyz
 
         distance_error = _max_mesh_edge_distance_error(original_xyz, aligned_xyz, face_values)
         determinant = float(np.linalg.det(transform.rotation))
-        alignment_status = _alignment_status(result.converged, determinant, distance_error)
+        alignment_status = _alignment_status(converged, determinant, distance_error)
         transform_records.append(_transform_record(sample_tag, transform, determinant))
         qc_records.append({
             "sample_tag": sample_tag,
             "input_layer": input_layer,
+            "alignment_method": args.alignment_mode.upper(),
+            "reference_sample": reference_sample,
             "landmark_count": len(landmark_ids),
             "rms_landmark_residual_mm": transform.rms_residual,
             "max_landmark_residual_mm": transform.max_residual,
             "det_rotation": determinant,
             "max_mesh_edge_distance_error_mm": distance_error,
-            "gpa_iterations": result.iterations,
-            "gpa_converged": result.converged,
-            "gpa_final_delta": result.final_delta,
+            "gpa_iterations": iterations,
+            "gpa_converged": converged,
+            "gpa_final_delta": final_delta,
             "status": alignment_status,
         })
 
@@ -139,11 +178,13 @@ def main() -> None:
     _save_alignment_overlay(
         aligned_for_plot,
         result.aligned_landmarks,
-        result.mean_landmarks,
+        target_landmarks,
         out_dir / "alignment_qc_overlay.png",
+        target_label,
     )
 
     print("[Alignment] PCA-ready samples:", " ".join(sample_tags))
+    print("[Alignment] Method:", args.alignment_mode)
     print(
         qc_summary[[
             "sample_tag",
@@ -238,6 +279,7 @@ def _save_alignment_overlay(
     aligned_landmarks: dict[str, np.ndarray],
     mean_landmarks: np.ndarray,
     output_path: Path,
+    target_label: str,
 ) -> None:
     fig = plt.figure(figsize=(11, 8))
     axis = fig.add_subplot(111, projection="3d")
@@ -255,7 +297,7 @@ def _save_alignment_overlay(
         )
     axis.scatter(
         mean_landmarks[:, 0], mean_landmarks[:, 1], mean_landmarks[:, 2],
-        s=80, marker="x", linewidths=2.5, color="black", label="GPA mean",
+        s=80, marker="x", linewidths=2.5, color="black", label=target_label,
     )
     axis.set_title("Rigid whole-ear alignment QC")
     axis.set_xlabel("X")

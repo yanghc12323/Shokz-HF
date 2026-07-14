@@ -1,8 +1,8 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
 > 当前主线：论文式 patch-based remesh
-> 当前阶段：W2 已完成整耳共享边修补与刚体统一坐标系；8 个样本具备 W3 PCA 输入资格
-> 更新时间：2026-07-13
+> 当前阶段：W2 整耳修补与刚体统一坐标系已完成；W3 PCA 与平均耳首轮结果已产出
+> 更新时间：2026-07-14
 
 ## 1. 项目目标
 
@@ -26,11 +26,11 @@
 当前有效真实样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。目前项目内已有：
 
 ```text
-T013_L, T049_L, T076_L, T077_L, T078_L,
-T088_L, T094_L, T097_L, T099_L
+T013_L, T049_L, T066_L, T068_L, T069_L, T076_L,
+T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
 ```
 
-当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。正式整耳输入采用 `salvaged` 层；当前 9 个样本的 15 个 region 均为 salvaged PASS。
+当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。正式整耳输入采用 `salvaged` 层，再由独立 `weld_repaired` 层完成保守共享边修补。
 
 旧的 `T001_L` 和特殊诊断样本 `T100_L/T0100_L` 已从当前批处理移除，不应混入当前 15 区域结果。
 
@@ -329,11 +329,11 @@ python scripts/align_whole_ear.py --whole_ear_dir output/whole_ear_r24/weld_repa
 当前 `weld_repaired` whole-ear 结果：
 
 ```text
-PASS / PCA_READY: T013_L, T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
+PASS / PCA_READY: T013_L, T066_L, T068_L, T069_L, T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
 FAIL:             T049_L（L13-L17 邻接 T003 raw FAIL，自动修补被拒绝）
 ```
 
-T094_L 的 L20-L21 在 index 1 由 0.4135 mm 冲突修补为 0；T097_L 的 L21-L29 在 index 23 由 0.3098 mm 冲突修补为 0。两点均通过锚点插值和原始 mesh 表面投影。8 个 `PCA_READY` 样本已完成刚体对齐，GPA 均收敛，所有 `det(R)=1`，最大 mesh 边长保持误差约为 `1.84e-14 mm`。
+T066_L、T094_L 和 T097_L 的 baseline WARNING 已在独立 `weld_repaired` 层经过保守共享边修补后转为 PASS。11 个 `PCA_READY` 样本均已完成刚体对齐，GPA 均收敛，所有 `det(R)=1`，最大 mesh 边长保持误差约为 `1.84e-14 mm`。
 
 ## 11. 当前主线文件
 
@@ -345,12 +345,14 @@ T094_L 的 L20-L21 在 index 1 由 0.4135 mm 冲突修补为 0；T097_L 的 L21-
 | `scripts/visualize_remesh_qc.py` | QC 可视化命令行入口 |
 | `ear_param/whole_ear.py` | 全局模板、共享边坐标选择与焊接 QC |
 | `scripts/build_whole_ear.py` | 整耳构建、共享边修补、PLY/CSV/QC 图批处理入口 |
-| `ear_param/alignment.py` | 刚体 Kabsch 与 Generalized Procrustes |
-| `scripts/align_whole_ear.py` | 整耳坐标统一与对齐 QC 入口 |
-| `docs/remesh_usage_w2.md` | W2 使用说明 |
-| `docs/whole_ear_weld_and_alignment.md` | 整耳焊接与坐标统一说明 |
-| `docs/qc_visualization_and_region_strategy.md` | QC 与 region table 优化策略 |
-| `docs/w3_pca_average_ear_technical_route.md` | W3 PCA 平均耳技术路线 |
+| `ear_param/alignment.py` | 刚体 Kabsch、GPA 与固定参考耳对齐 |
+| `scripts/align_whole_ear.py` | GPA 或固定参考耳的整耳坐标统一与对齐 QC 入口 |
+| `ear_param/pca_average.py` | W3 输入门禁、PCA、平均耳与模式网格导出 |
+| `scripts/build_average_ear.py` | W3 PCA 与平均耳命令行入口 |
+| `docs/W2 Remesh 使用说明.md` | W2 使用说明 |
+| `docs/整耳全局模板、边界焊接与刚体统一坐标系.md` | 整耳焊接与坐标统一说明 |
+| `docs/0711-Remesh QC 可视化与 Region Table 优化策略.md` | QC 与 region table 优化策略 |
+| `docs/W3 PCA 与平均耳技术路线.md` | W3 PCA 平均耳技术路线 |
 
 ## 12. 项目范围
 
@@ -369,12 +371,34 @@ python -m pytest -q
 当前验证结果：
 
 ```text
-47 passed
+65 passed
 ```
 
 备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。
 
-## 14. W3 前置条件
+## 14. W3 PCA 与平均耳
+
+### 正式全流程批处理
+
+批处理以左耳 `L` 为标准侧：L 输入不变；R 输入在 remesh 前沿默认 X 轴镜像，并反转三角面绕序。原始输入不改写，标准化 PLY、landmark 与审计 JSON 保存于 `output/canonical_inputs_r24/`。R 样本仍保留 `_R` 标签，但其几何已处于 canonical L 坐标系。
+
+扫描 `data/clean_mesh/` 与 `data/landmarks/` 中所有同名配对样本，并依次运行 remesh、salvage、整耳 Weld repair、GPA 对齐与 GPA-PCA：
+
+```powershell
+python scripts/run_full_pipeline.py
+```
+
+每个样本的错误不会中断其他样本。终端会显示阶段进度和最终总表；同一批的 CSV 与日志保存在 `output/pipeline_runs/<时间戳>/`。完整区域级 QC 图会显著增加运行时间；日常快速复核可显式跳过绘图：
+
+```powershell
+python scripts/run_full_pipeline.py --skip-remesh-qc
+```
+
+如需同时保留固定参考耳坐标系下的独立 PCA 分支，指定一个已通过 Weld 的参考样本。该命令仍会运行 GPA-PCA；两条分支分别写入独立目录，绝不混合输入：
+
+```powershell
+python scripts/run_full_pipeline.py --reference-sample T076_L
+```
 
 W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整耳 PCA 的可信输入是：
 
@@ -384,12 +408,32 @@ output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
 output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
 ```
 
-只有上游 `weld_repaired` 的 `weld_qc_summary.csv` 中 `pca_ready=True` 且对齐 QC 为 PASS 的样本可以进入正式 PCA。当前首批候选为 8 个样本；样本量仍较小，适合流程实现与初步验证，不应将统计结果解释为稳定总体模型。
+固定参考耳分支对应读取：
+
+```text
+output/whole_ear_r24/aligned_reference_weld_repaired/<sample>_aligned_whole_ear_points.csv
+output/whole_ear_r24/aligned_reference_weld_repaired/<sample>_aligned_whole_ear_faces.csv
+output/whole_ear_r24/aligned_reference_weld_repaired/alignment_qc_summary.csv
+```
+
+GPA 坐标系适用于群体 PCA 与平均耳；固定参考耳坐标系适用于工程展示、测量和对齐标准敏感性比较。两条路径均只使用旋转和平移。
+
+固定参考耳目录还会为每个样本额外导出同坐标的 `*_aligned_whole_ear.obj` 与 `*_aligned_whole_ear.stl`，供工程软件查看；PCA 仍读取 points/faces CSV。
+
+只有上游 `weld_repaired` 的 `weld_qc_summary.csv` 中 `pca_ready=True`、`input_layer=weld_repaired`，且对齐 QC 为 PASS 的样本可以进入正式 PCA。W3 还会逐样本验证有限坐标、`global_vertex_id` 点序和 faces 完全一致；不合格样本会记录到 `pca_input_manifest.csv`，不会静默混入。
+
+运行命令：
+
+```powershell
+python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_weld_repaired --weld_dir output/whole_ear_r24/weld_repaired --out_dir output/w3_pca_r24 --variance_threshold 0.75
+```
+
+本次首轮真实运行纳入 11 个样本，输出 4453 顶点、8640 面的平均耳 `output/w3_pca_r24/mean_whole_ear.ply`。前三个主成分累计解释 75.35% 的差异，因此按 75% 阈值保留 3 个主成分。样本量仍处于流程验证阶段，不应将当前模式解释为稳定总体模型。
 
 W3 技术路线详见：
 
 ```text
-docs/w3_pca_average_ear_technical_route.md
+docs/W3 PCA 与平均耳技术路线.md
 ```
 
 ## 15. 文档维护规则
@@ -397,8 +441,8 @@ docs/w3_pca_average_ear_technical_route.md
 每次代码调整、功能开发、数据流程变化或 QC 结论变化后，都应同步更新：
 
 1. `README.md`：记录当前项目真实状态、主命令、当前结论。
-2. `docs/remesh_usage_w2.md`：记录 W2 使用方法、QC 判定和诊断流程。
-3. `docs/qc_visualization_and_region_strategy.md`：记录 QC 证据、region table 调整策略。
-4. `docs/w3_pca_average_ear_technical_route.md`：如果 W2 输出契约或 W3 前置条件变化，需要同步更新。
+2. `docs/W2 Remesh 使用说明.md`：记录 W2 使用方法、QC 判定和诊断流程。
+3. `docs/0711-Remesh QC 可视化与 Region Table 优化策略.md`：记录 QC 证据、region table 调整策略。
+4. `docs/W3 PCA 与平均耳技术路线.md`：记录 W3 输入契约、命令、输出和实际结果。
 
 不要让 README 停留在旧样本、旧 region table 或旧结论上。

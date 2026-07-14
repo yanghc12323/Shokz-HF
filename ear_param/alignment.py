@@ -29,6 +29,16 @@ class ProcrustesResult:
     final_delta: float
 
 
+@dataclass(frozen=True)
+class FixedReferenceResult:
+    """Rigid transforms mapping every sample to one named reference ear."""
+
+    reference_sample: str
+    reference_landmarks: np.ndarray
+    transforms: dict[str, RigidTransform]
+    aligned_landmarks: dict[str, np.ndarray]
+
+
 def rigid_kabsch(source: np.ndarray, target: np.ndarray) -> RigidTransform:
     """Find the proper rigid transform minimizing landmark squared error."""
     source = _validate_landmarks(source, "source")
@@ -135,6 +145,42 @@ def generalized_procrustes(
         iterations=iterations,
         converged=converged,
         final_delta=final_delta,
+    )
+
+
+def fixed_reference_alignment(
+    landmark_sets: dict[str, np.ndarray],
+    *,
+    reference_sample: str,
+) -> FixedReferenceResult:
+    """Rigidly align each landmark set to one named reference landmark set."""
+    if not landmark_sets:
+        raise ValueError("at least one landmark set is required")
+    if reference_sample not in landmark_sets:
+        raise ValueError(f"reference sample not found: {reference_sample}")
+
+    validated = {
+        sample_id: _validate_landmarks(landmarks, sample_id)
+        for sample_id, landmarks in landmark_sets.items()
+    }
+    shapes = {landmarks.shape for landmarks in validated.values()}
+    if len(shapes) != 1:
+        raise ValueError("all landmark sets must have the same shape")
+
+    reference = validated[reference_sample].copy()
+    transforms = {
+        sample_id: rigid_kabsch(landmarks, reference)
+        for sample_id, landmarks in validated.items()
+    }
+    aligned = {
+        sample_id: apply_rigid_transform(validated[sample_id], transform)
+        for sample_id, transform in transforms.items()
+    }
+    return FixedReferenceResult(
+        reference_sample=reference_sample,
+        reference_landmarks=reference,
+        transforms=transforms,
+        aligned_landmarks=aligned,
     )
 
 

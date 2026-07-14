@@ -208,9 +208,9 @@ T097_L / L21-L29: WARNING, max_conflict=0.3098 mm
 python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
 ```
 
-T094_L 与 T097_L 分别完成一个满足条件的单点修补，修补后冲突均为 0，`weld_repaired` 层由 6 PASS、2 WARNING、1 FAIL 变为 8 PASS/PCA_READY、1 FAIL。`T049_L` 仍因 L13-L17 相邻 raw FAIL 而被拒绝自动修补。请同时查看 `<sample>_edge_repair_qc.csv` 和 weld QC 图：青色点表示已成功修补，紫色点表示被拒绝的候选点。
+在当前 12 样本批次中，T066_L、T094_L 与 T097_L 的 baseline WARNING 均满足保守修补条件，并在 `weld_repaired` 层转为 PASS/PCA_READY；其余 8 个 baseline PASS 样本保持 PASS。当前结果为 11 PASS/PCA_READY、1 FAIL。`T049_L` 仍因 L13-L17 相邻 raw FAIL 而被拒绝自动修补。请同时查看 `<sample>_edge_repair_qc.csv` 和 weld QC 图：青色点表示已成功修补，紫色点表示被拒绝的候选点。
 
-最终只有 `weld_repaired` 中 `pca_ready=True` 且 `aligned_weld_repaired/alignment_qc_summary.csv` 为 PASS 的样本进入 W3。当前共有 8 个样本已完成刚体对齐。详细字段见 `docs/whole_ear_weld_and_alignment.md`。
+最终只有 `weld_repaired` 中 `pca_ready=True` 且 `aligned_weld_repaired/alignment_qc_summary.csv` 为 PASS 的样本进入 W3。当前共有 11 个样本已完成刚体对齐，并已进入首轮 PCA/平均耳计算。详细字段见 `docs/整耳全局模板、边界焊接与刚体统一坐标系.md`。
 
 ## 11. 文档维护
 

@@ -91,6 +91,23 @@ def test_generalized_procrustes_aligns_samples_without_changing_size():
     assert aligned_distance == pytest.approx(original_distance)
 
 
+def test_fixed_reference_alignment_maps_every_sample_to_named_reference():
+    from ear_param.alignment import fixed_reference_alignment
+
+    reference = _landmarks()
+    rotation = _rotation_z(0.55)
+    translated = (rotation @ reference.T).T + np.array([3.0, -2.5, 1.0])
+    sample_sets = {"REF_L": reference, "MOVING_L": translated}
+
+    result = fixed_reference_alignment(sample_sets, reference_sample="REF_L")
+
+    np.testing.assert_allclose(result.reference_landmarks, reference, atol=1e-10)
+    for aligned in result.aligned_landmarks.values():
+        np.testing.assert_allclose(aligned, reference, atol=1e-10)
+    assert result.transforms["REF_L"].rms_residual == pytest.approx(0.0, abs=1e-10)
+    assert np.linalg.det(result.transforms["MOVING_L"].rotation) == pytest.approx(1.0)
+
+
 def test_alignment_status_requires_gpa_convergence():
     from scripts.align_whole_ear import _alignment_status
 
@@ -235,3 +252,73 @@ def test_align_whole_ear_cli_exports_aligned_pca_ready_samples():
 
     assert mixed.returncode != 0
     assert "one whole-ear input layer" in mixed.stderr
+
+
+def test_align_whole_ear_cli_exports_fixed_reference_alignment():
+    work_dir = Path(".test_artifacts") / "fixed_reference_cli" / uuid4().hex
+    whole_dir = work_dir / "whole"
+    landmarks_dir = work_dir / "landmarks"
+    out_dir = work_dir / "aligned_reference"
+    whole_dir.mkdir(parents=True, exist_ok=True)
+    landmarks_dir.mkdir(parents=True, exist_ok=True)
+
+    reference = _landmarks()
+    transformed = (_rotation_z(0.7) @ reference.T).T + np.array([4.0, -2.0, 3.0])
+    faces = pd.DataFrame({
+        "global_face_id": [0, 1],
+        "global_v0": [0, 0],
+        "global_v1": [1, 2],
+        "global_v2": [2, 3],
+    })
+    landmark_ids = ["L7", "L13", "L15", "L26"]
+    for sample_tag, xyz in {"REF_L": reference, "MOVING_L": transformed}.items():
+        sample_id, side = sample_tag.split("_")
+        pd.DataFrame({
+            "sample_id": sample_id,
+            "side": side,
+            "global_vertex_id": range(len(xyz)),
+            "x": xyz[:, 0],
+            "y": xyz[:, 1],
+            "z": xyz[:, 2],
+        }).to_csv(whole_dir / f"{sample_tag}_whole_ear_points.csv", index=False)
+        faces.assign(sample_id=sample_id, side=side).to_csv(
+            whole_dir / f"{sample_tag}_whole_ear_faces.csv", index=False
+        )
+        pd.DataFrame({
+            "sample_id": [sample_id],
+            "side": [side],
+            "input_layer": ["weld_repaired"],
+            "status": ["PASS"],
+            "pca_ready": [True],
+        }).to_csv(whole_dir / f"{sample_tag}_weld_qc_summary.csv", index=False)
+        pd.DataFrame({
+            "landmark_id": landmark_ids,
+            "x": xyz[:, 0],
+            "y": xyz[:, 1],
+            "z": xyz[:, 2],
+        }).to_csv(landmarks_dir / f"{sample_tag}_landmarks.csv", index=False)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/align_whole_ear.py",
+            "--whole_ear_dir", str(whole_dir),
+            "--landmarks_dir", str(landmarks_dir),
+            "--out_dir", str(out_dir),
+            "--alignment_mode", "fixed_reference",
+            "--reference_sample", "REF_L",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (out_dir / "fixed_reference_landmarks.csv").exists()
+    summary = pd.read_csv(out_dir / "alignment_qc_summary.csv")
+    assert set(summary["alignment_method"]) == {"FIXED_REFERENCE"}
+    assert set(summary["reference_sample"]) == {"REF_L"}
+    aligned = pd.read_csv(out_dir / "MOVING_L_aligned_whole_ear_points.csv")
+    np.testing.assert_allclose(aligned[["x", "y", "z"]], reference, atol=1e-9)
+    assert (out_dir / "MOVING_L_aligned_whole_ear.obj").exists()
+    assert (out_dir / "MOVING_L_aligned_whole_ear.stl").exists()
