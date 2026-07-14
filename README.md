@@ -1,7 +1,7 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
 > 当前主线：论文式 patch-based remesh
-> 当前阶段：W2 整耳修补与刚体统一坐标系已完成；W3 PCA 与平均耳首轮结果已产出
+> 当前阶段：W2/W3 核心功能已完成；已完成 11 样本 GPA/T076 PCA 首轮对比，28 样本全流程验证待运行
 > 更新时间：2026-07-14
 
 ## 1. 项目目标
@@ -23,16 +23,18 @@
 
 ## 2. 当前真实数据状态
 
-当前有效真实样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。目前项目内已有：
+原始输入样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。目前已有 28 个完整配对样本：
 
 ```text
-T013_L, T049_L, T066_L, T068_L, T069_L, T076_L,
-T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
+T001_L, T002_L, T003_L, T004_L, T005_L, T006_L, T007_L,
+T008_L, T009_L, T010_L, T013_L, T049_L, T052_L, T054_L,
+T057_L, T058_L, T061_L, T065_L, T066_L, T068_L, T069_L,
+T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
 ```
 
 当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。正式整耳输入采用 `salvaged` 层，再由独立 `weld_repaired` 层完成保守共享边修补。
 
-旧的 `T001_L` 和特殊诊断样本 `T100_L/T0100_L` 已从当前批处理移除，不应混入当前 15 区域结果。
+当前已完成 W2 salvage、Weld 和刚体对齐门禁的仍是 12 个历史处理样本，其中 11 个为 PCA-ready，`T049_L` 为 Weld FAIL。其余原始配对样本尚待本轮全流程批处理验证；原始配对存在不等于可以进入 PCA。
 
 ## 3. 当前 W2 进展
 
@@ -358,20 +360,22 @@ T066_L、T094_L 和 T097_L 的 baseline WARNING 已在独立 `weld_repaired` 层
 
 本仓库仅保留论文式 patch-based remesh、W2 质量控制、整耳焊接、共享边修补和刚体坐标统一主线。早期 KDTree 参数化采样路线及其旧命令行、模拟数据、可视化、校验脚本和测试已移除；它们不能作为 remesh 失败时的回退方案，也不能作为 W3 PCA 输入。
 
+`docs/archive/` 仅保存阶段性汇报和开发实施记录，方便追溯，不应作为当前流程的使用说明或 AI 实现依据。当前项目规范以 README、W2 使用说明、整耳 Weld/坐标说明、W3 技术路线和 GPA/T076 对比文档为准。
+
 当前通用的二维标准三角形采样网格由 `ear_param/remesh.py` 直接维护，仍保持每个 resolution 的固定点数与点序。
 
 ## 13. 测试
 
-运行全部测试：
+运行当前主线测试：
 
 ```powershell
-python -m pytest -q
+python -m pytest tests -q
 ```
 
 当前验证结果：
 
 ```text
-65 passed
+66 passed
 ```
 
 备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。
@@ -393,6 +397,8 @@ python scripts/run_full_pipeline.py
 ```powershell
 python scripts/run_full_pipeline.py --skip-remesh-qc
 ```
+
+默认不使用 `--skip-remesh-qc` 时，只要 remesh 阶段已完成，都会生成 raw、repaired、salvaged 三层 region QC 图；这也包括 `salvaged=FAIL` 的样本，便于定位失败区域。`salvaged=FAIL` 仍会被严格阻止进入 Weld、刚体对齐和 PCA。
 
 如需同时保留固定参考耳坐标系下的独立 PCA 分支，指定一个已通过 Weld 的参考样本。该命令仍会运行 GPA-PCA；两条分支分别写入独立目录，绝不混合输入：
 

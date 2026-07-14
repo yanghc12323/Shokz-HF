@@ -1,7 +1,7 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
 > 适用阶段：W2 真实样本 remesh、QC 与 region table 优化
-> 更新时间：2026-07-13
+> 更新时间：2026-07-14
 > 主入口：`scripts/parameterize_ear_remesh.py`
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
@@ -21,11 +21,10 @@ W2 的目标是将 landmark 定义的三角区域从原始 3D mesh 中提取出�
 
 ## 2. 当前有效样本
 
-当前主线使用 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的真实样本。目前项目内已有：
+当前主线以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的真实样本为准。目前已有 28 个原始 mesh/landmark 完整配对；应由正式批处理逐一完成 remesh、salvage、Weld 和对齐门禁。
 
 ```text
-T013_L, T049_L, T076_L, T077_L, T078_L,
-T088_L, T094_L, T097_L, T099_L
+当前已完成 W2/Weld 的历史处理批次包含 12 个样本，其中 11 个 PCA-ready，`T049_L` 为 Weld FAIL。其余配对样本不应因文件已存在而被视为已通过 W2。
 ```
 
 当前 `config/region_table.csv` 包含 15 个 region，字段为：
@@ -161,6 +160,8 @@ output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 1. raw 图显示未修补前的原始映射状态，红色叉号表示 raw unmapped 点。
 2. repaired 图显示补点后的状态，橙色三角表示 repaired 点，红色叉号表示仍未修补点。
 3. salvaged 图显示 raw FAIL 保守抢救后的状态；如果没有满足安全限制，会保留未修补点并在 summary 中写明原因。
+
+正式批处理默认也遵循此诊断原则：即使一个样本的最终 `salvaged` 状态为 FAIL，仍会生成该样本的三层 QC 图。该 FAIL 状态只阻止样本进入后续 Weld、刚体对齐和 PCA，不应阻止失败原因的可视化。
 4. 三张图都包含 3D patch faces、三条 boundary path、三个 landmark 点、2D UV patch 和 template sample 点。
 
 QC 图的用途是定位问题原因，而不是直接调阈值。
@@ -270,7 +271,7 @@ python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/sa
 
 修补层只处理 baseline 的局部 WARNING 共享边：两侧 raw region 不能 FAIL、没有退化面、冲突必须是 1--2 个连续的 repaired-only 点且两侧都有可信锚点。程序按锚点插值、投影回原始 mesh，并同时更新两个相邻 region 的边界副本；`<sample>_edge_repair_qc.csv` 会完整记录是否修补、锚点、投影距离与拒绝原因。缺失或非有限候选坐标会写为 `non_finite_candidate`，不做自动修补。启用修补时不指定 `--out_dir` 会默认输出 `weld_repaired`，且程序拒绝覆盖 `salvaged` 基线。
 
-当前 baseline 9 样本结果为 6 PASS、2 WARNING、1 FAIL。修补后，T094_L 的 L20-L21 index 1（0.4135 mm）和 T097_L 的 L21-L29 index 23（0.3098 mm）均修补为 0；当前 `weld_repaired` 为 8 PASS/PCA_READY、1 FAIL。`T049_L` 的 L13-L17 因相邻 T003 raw FAIL 而保留 FAIL，不会自动纳入 PCA。
+历史 12 样本批次中，T066_L、T094_L 与 T097_L 的 baseline WARNING 经保守共享边修补后转为 PASS；当前 `weld_repaired` 为 11 PASS/PCA_READY、1 FAIL。T094_L 的 L20-L21 index 1（0.4135 mm）和 T097_L 的 L21-L29 index 23（0.3098 mm）均修补为 0。T049_L 的 L13-L17 因相邻 T003 raw FAIL 而保留 FAIL，不会自动纳入 PCA。28 样本全流程完成后，应以新的 batch summary 覆盖本段历史统计。
 
 最后只对 `weld_repaired` 中 `pca_ready=True` 的整耳做刚体对齐：
 

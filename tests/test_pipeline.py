@@ -107,6 +107,37 @@ def test_pipeline_allows_raw_remesh_warning_when_salvage_passes(tmp_path: Path):
     assert records.loc["T001_L", "pca_included"] == "YES"
 
 
+def test_pipeline_visualizes_remesh_qc_when_salvage_fails(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir = tmp_path / "clean_mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    mesh_dir.mkdir()
+    landmarks_dir.mkdir()
+    (mesh_dir / "T001_L.ply").write_text("mesh placeholder")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text("landmark_id,x,y,z\n")
+
+    visualized: list[str] = []
+    stages = StageFunctions(
+        remesh_sample=lambda tag: {"remesh": "FAIL", "salvage": "FAIL"},
+        remesh_qc=lambda tag: visualized.append(tag) or "FAIL",
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+    )
+
+    result = run_pipeline(
+        PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir),
+        stage_functions=stages,
+    )
+
+    record = result.records.iloc[0]
+    assert visualized == ["T001_L"]
+    assert record["salvage"] == "FAIL"
+    assert record["remesh_qc"] == "FAIL"
+    assert record["weld"] == "SKIPPED"
+
+
 def test_pipeline_writes_summary_and_skips_pca_under_two_aligned_samples(tmp_path: Path):
     from ear_param.pipeline import (
         PipelineConfig,

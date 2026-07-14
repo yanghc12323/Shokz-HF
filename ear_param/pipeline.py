@@ -181,7 +181,6 @@ def run_pipeline(
             records.at[index, "reason"] = _append_reason(
                 row["reason"], "salvage_not_pass"
             )
-            continue
         if config.skip_remesh_qc:
             records.at[index, "remesh_qc"] = "SKIPPED_BY_OPTION"
         else:

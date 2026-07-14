@@ -28,12 +28,11 @@ data/clean_mesh/
 .agents/
 .planning/
 .test_artifacts/
+.docx_review/
 
 # Project-specific: reference documents and binaries
 *.pdf
 *.docx
-
-3.7.0
 
 # Test cache
 .pytest_cache/
