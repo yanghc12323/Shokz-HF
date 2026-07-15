@@ -50,18 +50,21 @@ PySide6 主窗口
     landmarks/                    # 已复制的 landmark CSV
     config/                       # region table 与 edge controls 快照
   runs/
-    <run-id>/
-      desktop_state.json          # UI 任务状态、检查点和恢复信息
-      events.jsonl                # GUI 消费的结构化进度事件
-      artifacts/                  # 唯一 --output-root；由核心创建与写入
-        .pipeline-reservation
-        manifest.json
-        pipeline_run_summary.csv
-        pipeline_batch_summary.csv
-        ...全部中间层与结果...
+    <logical-run-id>/
+      run_history.json            # 逻辑任务与各次尝试的关联
+      attempts/
+        <attempt-id>/
+          desktop_state.json      # UI 任务状态、检查点和恢复信息
+          events.jsonl            # GUI 消费的结构化进度事件
+          artifacts/              # 本次唯一 --output-root；由核心创建与写入
+            .pipeline-reservation
+            manifest.json
+            pipeline_run_summary.csv
+            pipeline_batch_summary.csv
+            ...本次阶段产物...
 ```
 
-`artifacts/` 启动时必须不存在或为空，由分析核心原子认领；`desktop_state.json` 与 `events.jsonl` 位于其父目录，避免破坏现有 `prepare_empty_output_root()` 约束。每次运行的配置、输入文件元数据、软件版本和代码状态均由 manifest 与项目状态共同记录。
+每个 attempt 的 `artifacts/` 启动时必须不存在或为空，由分析核心原子认领；`desktop_state.json` 与 `events.jsonl` 位于其父目录，避免破坏现有 `prepare_empty_output_root()` 约束。每次运行的配置、输入文件元数据、软件版本和代码状态均由 manifest 与项目状态共同记录。
 
 ## 5. 默认交互流程
 
@@ -118,10 +121,10 @@ CREATED -> VALIDATING -> QUEUED -> RUNNING -> PAUSE_REQUESTED -> PAUSED
                                    COMPLETED / FAILED
 ```
 
-- **暂停**：是协作式安全暂停。控制器记录请求，当前原子处理单元完成后停止后续调度；只有 manifest/阶段产物通过检查时才转为 `PAUSED`。
+- **暂停**：是协作式安全暂停。控制器记录请求，当前原子处理单元完成后停止后续调度；当前 attempt 的子进程和隔离目录保持不变，只有 manifest/阶段产物通过检查时才转为 `PAUSED`，恢复后在同一进程继续。
 - **取消**：停止受控子进程，状态标为 `CANCELLED`。已写入的证据被保留，但未完成阶段和未验证产物不被索引为可用结果。
 - **失败**：保留异常、退出码、事件、最后安全检查点与可恢复条件，状态标为 `FAILED`。
-- **恢复**：读取 `desktop_state.json`、manifest 和产物，验证最近成功阶段的输入/输出契约后继续。若验证失败，只提供从更早阶段重跑，不能假装续跑成功。
+- **失败后恢复**：不复用失败 attempt 的非空 `--output-root`。控制器建立同一 logical run 下的新 attempt 和新的空 `artifacts/`，读取父 attempt 中最后一个已验证阶段的产物作为只读输入，并在新 manifest 中记录父 attempt、来源阶段与输入校验结果。若验证失败，只提供从更早阶段重跑，不能假装续跑成功。
 
 对于第一版，暂停并不承诺在任意 Python 指令中即时冻结；它明确发生在分析核心声明的安全检查点。取消可以即时请求，但仍需在隔离目录中将结果标记为不可用于下游分析。
 
@@ -129,7 +132,7 @@ CREATED -> VALIDATING -> QUEUED -> RUNNING -> PAUSE_REQUESTED -> PAUSED
 
 - 正式全流程运行调用 `scripts/run_full_pipeline.py`，显式传入项目内输入目录、配置快照和 `runs/<run-id>/artifacts`。
 - GUI 进度以 JSONL 事件为主；终端输出、`pipeline_run.log` 仅作为人类可读补充。
-- ArtifactIndexer 以 `manifest.json` 为运行根证据，结合阶段汇总 CSV、QC 汇总和文件存在性建立索引；不能只因文件名存在就将产物认定为有效。
+- ArtifactIndexer 以 `manifest.json` 为 attempt 根证据，结合 `run_history.json`、阶段汇总 CSV、QC 汇总和文件存在性建立索引；不能只因文件名存在就将产物认定为有效。
 - ResultService 使用现有严格门禁：raw/salvaged/Weld/对齐/PCA 的状态都来自核心产物，且不允许 GUI 放宽阈值或绕过 `pca_ready`。
 - CLI compatibility：未传 GUI 专用参数时，既有脚本保持其当前输入、输出和行为；GUI 专用适配必须通过独立测试覆盖。
 
