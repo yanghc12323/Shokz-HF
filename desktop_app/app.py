@@ -14,8 +14,9 @@ _FONT_LOADED = False
 
 def _resource_path(*parts: str) -> Path:
     """Locate package resources in both source and PyInstaller builds."""
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    return base.joinpath(*parts)
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS, "desktop_app", *parts)
+    return Path(__file__).resolve().parent.joinpath(*parts)
 
 
 def _install_chinese_font(application: QApplication) -> None:
