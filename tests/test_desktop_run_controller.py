@@ -128,3 +128,10 @@ def test_start_recovery_runs_weld_from_parent_artifacts_only(tmp_path: Path):
     assert str(parent_salvaged) in controller.last_command
     assert str(child.artifacts_dir / "whole_ear_r24" / "weld_repaired") in controller.last_command
     assert controller.process.started
+
+    controller._finish_recovery(1)
+
+    manifest = json.loads((child.artifacts_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert controller.active_attempt.status is RunStatus.FAILED
+    assert manifest["status"] == "ERROR"
+    assert manifest["recovery"]["parent_attempt"] == parent.attempt_id

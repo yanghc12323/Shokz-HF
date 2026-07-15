@@ -30,6 +30,7 @@ class RunController(QObject):
         self.last_command: list[str] = []
         self._event_offset = 0
         self._event_remainder = b""
+        self._recovery_option: RecoveryOption | None = None
 
     @property
     def control_path(self) -> Path:
@@ -102,22 +103,47 @@ class RunController(QObject):
         process.setWorkingDirectory(str(project.root))
         finished_signal = getattr(process, "finished", None)
         if finished_signal is not None:
-            finished_signal.connect(lambda *_: self._finish_recovery())
+            finished_signal.connect(lambda exit_code, *_: self._finish_recovery(exit_code))
         process.start()
         self.process = process
         self.active_attempt = running
+        self._recovery_option = option
         self.last_command = [sys.executable, *arguments]
         self.attempt_changed.emit(running)
         return running
 
-    def _finish_recovery(self) -> None:
+    def _finish_recovery(self, exit_code: int) -> None:
         attempt = self._require_attempt()
-        completed = replace(attempt, status=RunStatus.COMPLETED)
-        self.active_attempt = completed
-        self._write_state(completed)
-        self.attempt_changed.emit(completed)
-        self.run_finished.emit(completed)
+        status = RunStatus.COMPLETED if exit_code == 0 else RunStatus.FAILED
+        attempt.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        recovery = json.loads((attempt.root / "recovery.json").read_text(encoding="utf-8"))
+        self._write_json(
+            attempt.artifacts_dir / "manifest.json",
+            {
+                "status": "COMPLETED" if status is RunStatus.COMPLETED else "ERROR",
+                "output_scope": "isolated",
+                "outputs": self._recovery_outputs(attempt),
+                "recovery": recovery,
+                "error": "" if status is RunStatus.COMPLETED else f"recovery process exited with {exit_code}",
+            },
+        )
+        updated = replace(attempt, status=status)
+        self.active_attempt = updated
+        self._write_state(updated)
+        self.attempt_changed.emit(updated)
+        self.run_finished.emit(updated)
         self.process = None
+        self._recovery_option = None
+
+    def _recovery_outputs(self, attempt: AttemptRecord) -> dict[str, str]:
+        option = self._recovery_option
+        if option is RecoveryOption.WELD:
+            return {"weld_dir": "whole_ear_r24/weld_repaired"}
+        if option is RecoveryOption.ALIGNMENT:
+            return {"aligned_dir": "whole_ear_r24/aligned_gpa"}
+        if option is RecoveryOption.PCA:
+            return {"pca_dir": "pca_gpa_r24"}
+        return {}
 
     def request_pause(self) -> AttemptRecord:
         return self._set_control_status("PAUSE_REQUESTED", RunStatus.PAUSE_REQUESTED)
