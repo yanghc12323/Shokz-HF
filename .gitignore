@@ -27,6 +27,7 @@ output/
 data/clean_mesh/
 .agents/
 .planning/
+.worktrees/
 .test_artifacts/
 .docx_review/
 
