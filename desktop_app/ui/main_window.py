@@ -20,6 +20,7 @@ from desktop_app.models import ProjectRecord
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
 from desktop_app.ui.project_wizard import ProjectWizard
+from desktop_app.ui.result_workbench import ResultWorkbench
 from desktop_app.ui.run_monitor import RunMonitor
 from desktop_app.validation_service import ValidationService
 
@@ -57,8 +58,9 @@ class MainWindow(QMainWindow):
         self.wizard.stack.removeWidget(self.wizard.monitor_placeholder)
         self.wizard.monitor_placeholder.deleteLater()
         self.wizard.stack.insertWidget(4, self.run_monitor)
+        self.result_workbench = ResultWorkbench()
         self.content_stack.addWidget(self.wizard)
-        self.content_stack.addWidget(self._placeholder("结果复核", "完成分析后，在此查看样本 QC 证据和三维结果。"))
+        self.content_stack.addWidget(self.result_workbench)
         self.content_stack.addWidget(self._placeholder("专家模式", "按阶段选择已验证的输入执行重跑。"))
         self.content_stack.addWidget(self._placeholder("运行记录", "查看本项目的运行、失败原因和恢复尝试。"))
         root_layout.addWidget(self.content_stack, 1)

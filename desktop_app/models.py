@@ -29,6 +29,14 @@ class StageName(StrEnum):
     FIXED_REFERENCE_PCA = "FIXED_REFERENCE_PCA"
 
 
+class LayerName(StrEnum):
+    RAW = "RAW"
+    REPAIRED = "REPAIRED"
+    SALVAGED = "SALVAGED"
+    WHOLE_EAR = "WHOLE_EAR"
+    AVERAGE_EAR = "AVERAGE_EAR"
+
+
 @dataclass(frozen=True)
 class ProjectRecord:
     root: Path
