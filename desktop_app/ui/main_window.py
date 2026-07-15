@@ -66,6 +66,11 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
         self.wizard.project_requested.connect(self.create_project)
+        self.wizard.import_requested.connect(
+            lambda mesh, landmarks, regions, edges: self.import_project_inputs(
+                Path(mesh), Path(landmarks), Path(regions), Path(edges)
+            )
+        )
         self._apply_style()
 
     def _build_sidebar(self) -> QWidget:
@@ -128,6 +133,30 @@ class MainWindow(QMainWindow):
         self.validation_page.set_issues(issues)
         self.workflow.set_project(project, issues)
         self.content_stack.setCurrentWidget(self.wizard)
+
+    def import_project_inputs(
+        self,
+        mesh_dir: Path,
+        landmarks_dir: Path,
+        region_table: Path,
+        edge_controls: Path,
+    ) -> ProjectRecord:
+        if self.project is None:
+            raise RuntimeError("请先创建或打开项目")
+        project = self.project_service.import_inputs(
+            self.project,
+            mesh_dir=mesh_dir,
+            landmarks_dir=landmarks_dir,
+            region_table=region_table,
+            edge_controls=edge_controls,
+        )
+        self.project = project
+        issues = self.validation_service.validate(project)
+        self.validation_page.set_issues(issues)
+        self.workflow.set_project(project, issues)
+        if self.workflow.can_advance_to("options"):
+            self.workflow.go_to("options")
+        return project
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""

@@ -101,6 +101,7 @@ class ProjectWizard(QWidget):
     """Visible guided sequence, intentionally separate from expert mode."""
 
     project_requested = Signal(str, str)
+    import_requested = Signal(str, str, str, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -141,12 +142,12 @@ class ProjectWizard(QWidget):
         layout.addStretch(1)
         return page
 
-    @staticmethod
-    def _build_import_page() -> QWidget:
+    def _build_import_page(self) -> QWidget:
         page, layout = _page("导入数据", "导入后软件只使用项目目录中的副本，原始数据不会被改写。")
         card = QFrame()
         card.setObjectName("contentCard")
         form = QFormLayout(card)
+        inputs: list[QLineEdit] = []
         for title, placeholder in (
             ("网格目录", "包含 .ply 网格的目录"),
             ("地标目录", "包含 *_landmarks.csv 的目录"),
@@ -156,6 +157,16 @@ class ProjectWizard(QWidget):
             input_box = QLineEdit()
             input_box.setPlaceholderText(placeholder)
             form.addRow(title, input_box)
+            inputs.append(input_box)
+        self.mesh_source, self.landmarks_source, self.region_source, self.edge_controls_source = inputs
+        button = QPushButton("导入并自动校验")
+        button.clicked.connect(
+            lambda: self.import_requested.emit(
+                self.mesh_source.text(), self.landmarks_source.text(),
+                self.region_source.text(), self.edge_controls_source.text(),
+            )
+        )
+        form.addRow("", button)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
