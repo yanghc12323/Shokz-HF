@@ -445,7 +445,11 @@ def repair_shared_edge_conflicts(
             for region_id in regions
         }
         degenerate = {
-            region_id: int(qc_by_region.loc[region_id, "degenerate_faces"])
+            region_id: _final_degenerate_face_count(qc_by_region.loc[region_id])
+            for region_id in regions
+        }
+        accepted_degenerate_salvage = {
+            region_id: _has_accepted_degenerate_salvage(qc_by_region.loc[region_id])
             for region_id in regions
         }
         invalid_indices = _non_finite_edge_indices(edge_rows)
@@ -475,6 +479,7 @@ def repair_shared_edge_conflicts(
             str(edge.status),
             raw_statuses,
             degenerate,
+            accepted_degenerate_salvage,
             severe,
             max_run_length,
         )
@@ -786,10 +791,14 @@ def _edge_repair_rejection_reason(
     raw_edge_status: str,
     raw_statuses: dict[str, str],
     degenerate_faces: dict[str, int],
+    accepted_degenerate_salvage: dict[str, bool],
     conflicts: list[dict[str, object]],
     max_run_length: int,
 ) -> str:
-    if any(status == "FAIL" for status in raw_statuses.values()):
+    if any(
+        status == "FAIL" and not accepted_degenerate_salvage.get(region_id, False)
+        for region_id, status in raw_statuses.items()
+    ):
         return "adjacent_raw_fail"
     if any(count > 0 for count in degenerate_faces.values()):
         return "adjacent_degenerate_face"
@@ -802,6 +811,23 @@ def _edge_repair_rejection_reason(
     ])):
         return "conflict_run_too_long"
     return ""
+
+
+def _final_degenerate_face_count(qc_row: pd.Series) -> int:
+    """Use salvaged UV quality when available, else preserve legacy QC behavior."""
+    value = qc_row.get("degenerate_after", qc_row.get("degenerate_faces", 0))
+    if pd.isna(value):
+        value = qc_row.get("degenerate_faces", 0)
+    return int(value)
+
+
+def _has_accepted_degenerate_salvage(qc_row: pd.Series) -> bool:
+    if str(qc_row.get("raw_status", "")).upper() != "FAIL":
+        return False
+    before = qc_row.get("degenerate_before", 0)
+    after = _final_degenerate_face_count(qc_row)
+    accepted = qc_row.get("degenerate_salvage_accepted", False)
+    return bool(before > 0 and after == 0 and _as_bool(accepted))
 
 
 def _contiguous_runs(indices: list[int]) -> list[list[int]]:

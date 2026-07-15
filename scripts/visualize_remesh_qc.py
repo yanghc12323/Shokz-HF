@@ -47,6 +47,12 @@ Example:
         default=0.35,
         help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
     )
+    parser.add_argument(
+        "--max_salvage_degenerate_ratio",
+        type=float,
+        default=0.015,
+        help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -123,6 +129,7 @@ Example:
                     result,
                     allow_raw_fail_repair=True,
                     max_raw_fail_repair_unmapped_ratio=args.max_salvage_unmapped_ratio,
+                    max_raw_fail_repair_degenerate_ratio=args.max_salvage_degenerate_ratio,
                 )
                 salvaged_record = classify_repaired_region_qc(sample_tag, result, salvaged)
                 salvaged_record.update({
@@ -168,6 +175,13 @@ Example:
                     "salvage_attempted": False,
                     "salvage_accepted": False,
                     "salvage_rejection_reason": "region_error",
+                    "degenerate_ratio": 0.0,
+                    "degenerate_before": 0,
+                    "degenerate_after": 0,
+                    "degenerate_salvage_attempted": False,
+                    "degenerate_salvage_accepted": False,
+                    "degenerate_salvage_method": "",
+                    "degenerate_salvage_rejection_reason": "region_error",
                 })
                 salvaged_record = dict(repaired_record)
                 print(f"  [ERROR] {exc}")

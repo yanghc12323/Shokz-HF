@@ -68,6 +68,13 @@ def classify_repaired_region_qc(
         "salvage_attempted": bool(repaired.salvage_attempted),
         "salvage_accepted": bool(repaired.salvage_accepted),
         "salvage_rejection_reason": repaired.salvage_rejection_reason,
+        "degenerate_ratio": float(repaired.degenerate_ratio),
+        "degenerate_before": int(repaired.degenerate_before),
+        "degenerate_after": int(repaired.degenerate_after),
+        "degenerate_salvage_attempted": bool(repaired.degenerate_salvage_attempted),
+        "degenerate_salvage_accepted": bool(repaired.degenerate_salvage_accepted),
+        "degenerate_salvage_method": repaired.degenerate_salvage_method,
+        "degenerate_salvage_rejection_reason": repaired.degenerate_salvage_rejection_reason,
         "flipped_faces": int(result.parameterization.flipped_face_count),
         "degenerate_faces": n_degenerate,
         "patch_face_count": int(len(result.patch.face_ids)),
@@ -130,7 +137,8 @@ def save_region_repaired_qc_figure(
     fig.suptitle(
         f"{result.region_id} | raw={record['raw_status']} -> repaired={record['status']} | "
         f"repairs={record['repair_count']} | "
-        f"unmapped={record['repaired_unmapped_count']}/{record['sample_point_count']}",
+        f"unmapped={record['repaired_unmapped_count']}/{record['sample_point_count']} | "
+        f"degenerate={record['degenerate_before']}->{record['degenerate_after']}",
         fontsize=11,
     )
     fig.tight_layout()
@@ -221,7 +229,10 @@ def _plot_uv_repaired_qc(
     result: RegionRemeshResult,
     repaired: RepairedSamples,
 ) -> None:
-    uv = np.asarray(result.parameterization.uv, dtype=float)
+    uv = np.asarray(
+        result.parameterization.uv if repaired.repaired_uv is None else repaired.repaired_uv,
+        dtype=float,
+    )
     faces = np.asarray(result.parameterization.local_faces, dtype=int)
     if len(faces) > 0:
         triangulation = mtri.Triangulation(uv[:, 0], uv[:, 1], faces)

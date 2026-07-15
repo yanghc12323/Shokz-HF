@@ -24,6 +24,7 @@ from ear_param.remesh import (
     compute_region_feature_values,
     extract_patch_faces,
     harmonic_parameterize_patch,
+    locate_uv_samples_in_faces_indexed,
     locate_uv_samples_in_faces,
     make_subdivision_template,
     map_samples_to_3d,
@@ -229,6 +230,18 @@ def test_locate_uv_samples_and_map_back_to_3d(single_triangle_mesh):
     np.testing.assert_allclose(mapped[:, 2], np.zeros(6))
 
 
+def test_indexed_uv_lookup_matches_reference_locator():
+    source = make_subdivision_template(10)
+    sample = make_subdivision_template(24)
+
+    reference = locate_uv_samples_in_faces(source.uv, source.faces, sample.uv)
+    indexed = locate_uv_samples_in_faces_indexed(source.uv, source.faces, sample.uv)
+
+    np.testing.assert_array_equal(indexed.face_indices, reference.face_indices)
+    np.testing.assert_allclose(indexed.barycentric, reference.barycentric)
+    np.testing.assert_array_equal(indexed.unmapped_mask, reference.unmapped_mask)
+
+
 def test_build_region_remesh_runs_stages_1_to_8(single_triangle_mesh, triangle_landmarks):
     region = {
         "region_id": "T900",
@@ -355,6 +368,70 @@ def _repair_test_result(
     )
 
 
+def _uv_degenerate_salvage_result(resolution: int) -> RegionRemeshResult:
+    """Build a flat patch with one internally repairable collapsed UV face."""
+    template = make_subdivision_template(resolution)
+    vertices = np.column_stack([
+        template.uv[:, 0],
+        template.uv[:, 1],
+        np.zeros(len(template.uv)),
+    ])
+    faces = template.faces
+    target_face = next(
+        face for face in faces
+        if np.all(template.barycentric[face].min(axis=1) > 0.0)
+    )
+    uv = template.uv.copy()
+    uv[int(target_face[2])] = (uv[int(target_face[0])] + uv[int(target_face[1])]) / 2.0
+
+    boundary_ids = np.where(np.isclose(template.barycentric.min(axis=1), 0.0))[0]
+    boundary = BoundaryPaths(
+        "L1",
+        "L2",
+        "L3",
+        boundary_ids.tolist(),
+        boundary_ids.tolist(),
+        boundary_ids.tolist(),
+    )
+    snapped = {
+        "L1": SnappedLandmark("L1", vertices[0], vertices[0], 0, 0.0),
+        "L2": SnappedLandmark("L2", vertices[1], vertices[1], 1, 0.0),
+        "L3": SnappedLandmark("L3", vertices[2], vertices[2], 2, 0.0),
+    }
+    patch = PatchExtraction(
+        face_ids=np.arange(len(faces)),
+        local_faces=faces,
+        local_vertices=vertices,
+        local_to_global=np.arange(len(vertices)),
+    )
+    parameterization = PatchParameterization(
+        uv=uv,
+        local_faces=faces,
+        local_vertices=vertices,
+        local_to_global=np.arange(len(vertices)),
+        original_face_ids=np.arange(len(faces)),
+        flipped_face_count=0,
+        degenerate_face_count=1,
+    )
+    located = LocatedSamples(
+        sample_uv=template.uv,
+        face_indices=np.zeros(len(template.uv), dtype=int),
+        barycentric=np.tile(np.array([1.0, 0.0, 0.0]), (len(template.uv), 1)),
+        unmapped_mask=np.zeros(len(template.uv), dtype=bool),
+    )
+    return RegionRemeshResult(
+        region_id="R001",
+        region_name="uv-degenerate-salvage",
+        snapped_landmarks=snapped,
+        boundary_paths=boundary,
+        patch=patch,
+        parameterization=parameterization,
+        template=template,
+        located_samples=located,
+        sample_points_3d=vertices.copy(),
+    )
+
+
 def test_repair_unmapped_samples_fills_warning_vertex_and_internal_points():
     result = _repair_test_result([0])
 
@@ -400,8 +477,31 @@ def test_repair_unmapped_samples_salvages_raw_fail_when_explicitly_allowed():
     assert repaired.repaired_count == 3
 
 
-def test_repair_unmapped_samples_salvage_refuses_degenerate_raw_fail():
-    result = _repair_test_result([0], degenerate_face_count=1)
+def test_repair_unmapped_samples_salvages_low_ratio_uv_degenerate_region():
+    result = _uv_degenerate_salvage_result(10)
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.raw_status == "FAIL"
+    assert repaired.status == "PASS"
+    assert repaired.exportable is True
+    assert repaired.salvage_attempted is True
+    assert repaired.salvage_accepted is True
+    assert repaired.degenerate_salvage_attempted is True
+    assert repaired.degenerate_salvage_accepted is True
+    assert repaired.degenerate_before == 1
+    assert repaired.degenerate_after == 0
+    assert repaired.degenerate_salvage_method == "local_uv_relaxation"
+    assert repaired.salvage_rejection_reason == ""
+    assert np.isfinite(repaired.points_3d).all()
+
+
+def test_repair_unmapped_samples_refuses_high_ratio_uv_degenerate_region():
+    result = _uv_degenerate_salvage_result(7)
 
     repaired = repair_unmapped_samples(
         result,
@@ -413,7 +513,8 @@ def test_repair_unmapped_samples_salvage_refuses_degenerate_raw_fail():
     assert repaired.status == "FAIL"
     assert repaired.exportable is False
     assert repaired.salvage_attempted is False
-    assert repaired.salvage_accepted is False
-    assert repaired.salvage_rejection_reason == "degenerate_faces"
-    assert repaired.repaired_count == 0
-    assert repaired.repaired_unmapped_count == 1
+    assert repaired.degenerate_salvage_attempted is False
+    assert repaired.degenerate_before == 1
+    assert repaired.degenerate_after == 1
+    assert repaired.degenerate_salvage_rejection_reason == "degenerate_ratio"
+    assert repaired.salvage_rejection_reason == "degenerate_ratio"

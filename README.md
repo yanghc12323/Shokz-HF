@@ -126,6 +126,7 @@ sample_tag  PASS  WARNING  FAIL  TOTAL
 --salvaged_out_dir output/parameterized_points_r24/salvaged
 --salvaged_mesh_out_dir output/remesh_r24/salvaged
 --max_salvage_unmapped_ratio 0.35
+--max_salvage_degenerate_ratio 0.015
 ```
 
 输出文件：
@@ -151,10 +152,12 @@ output/remesh_r24/salvaged/<sample>_<side>/<region_id>_remesh_salvaged.ply
 当前 salvage 安全限制：
 
 ```text
-degenerate_faces > 0：不 salvage
 raw unmapped ratio > --max_salvage_unmapped_ratio：不 salvage
+raw degenerate ratio > --max_salvage_degenerate_ratio：不尝试 UV 修补
 默认 --max_salvage_unmapped_ratio = 0.35
-salvage_accepted=True 只表示抢救后无 unmapped 且可导出，不等同于 raw PASS
+默认 --max_salvage_degenerate_ratio = 0.015（1.5%）
+退化面数量不设绝对门槛；比例合格后在 salvaged 层做局部 UV 修补
+salvage_accepted=True 必须同时满足：无 unmapped、degenerate_after=0、r24 最终面有效、r48 加密覆盖验证通过
 ```
 
 ## 6. 运行 QC 可视化
@@ -186,7 +189,7 @@ output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 
 1. `raw` 图：显示未修补前的原始映射结果，右侧红色叉号为 raw unmapped template 点。
 2. `repaired` 图：显示修补后的结果，右侧橙色三角为 repaired 点，红色叉号为仍未修补点。
-3. `salvaged` 图：显示对 raw FAIL 进行保守 salvage 后的结果；如果没有满足安全限制，会保留未修补状态并在 summary 中写明原因。
+3. `salvaged` 图：显示对 raw FAIL 进行保守 salvage 后的结果；若进行了 UV 退化修补，标题会显示 `degenerate=修补前->修补后`，右侧显示修补后的 UV 图。
 
 三张图左侧都显示 3D patch faces、三条 landmark boundary path 和三个 landmark 点；右侧都显示 2D UV patch 与固定 template samples。
 
@@ -196,7 +199,7 @@ output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 
 `scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
 
-repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。salvaged 层在相同修补算法基础上，额外允许一部分 raw FAIL 尝试修补，但会记录 `salvage_attempted`、`salvage_accepted` 和 `salvage_rejection_reason`。
+repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。salvaged 层在相同修补算法基础上，额外允许原始退化比例不超过 1.5% 的 raw FAIL 尝试局部 UV 修补，再重新映射与补点；不会新增第四层输出。
 
 当前 QC 结果不要再以旧四样本静态表为准，应直接读取最新输出：
 
@@ -214,7 +217,7 @@ output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 1. 已就位样本都可以通过同一条 CLI 运行并产出 points/faces/features/QC。
 2. r24 输出保持每个 region 325 点、576 面。
 3. 当前已新增 salvaged 层，用于记录 raw FAIL 是否能被保守修补。
-4. 如果 `degenerate_faces > 0` 或 `salvage_rejection_reason` 非空，应优先回到 boundary/region table 诊断。
+4. `degenerate_faces` 始终记录原始 source UV 退化数；salvaged 是否可用必须看 `degenerate_after`。只有 `degenerate_after=0` 且 `salvage_accepted=True` 才可继续进入整耳。
 5. 当前仍不建议盲目放宽 QC 或直接进入正式 W3 PCA。
 
 ## 8. 当前处理策略
@@ -230,7 +233,7 @@ T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选�
 具体原则：
 
 1. 先对比同一样本、同一区域的 raw / repaired / salvaged 三张图。
-2. raw FAIL 先看 `salvage_rejection_reason`：`degenerate_faces` 和 `unmapped_ratio` 都说明不应靠补点硬救。
+2. raw FAIL 先看 `salvage_rejection_reason`：`degenerate_ratio` 表示原始退化比例超过 1.5%，`unmapped_ratio` 表示未映射比例超过 0.35；二者都不进入自动 salvage。
 3. 对反复失败的共享边，周一继续推进人工 M 点方案，用解剖控制点约束最短路径。
 4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
 5. W3 不再直接读取独立 region；只使用整耳焊接 `pca_ready=True` 且刚体对齐 `status=PASS` 的样本。
@@ -298,7 +301,7 @@ output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
 status == PASS
 sample_point_count == expected_point_count
 unmapped_count == 0
-degenerate_faces == 0
+degenerate_after == 0（salvaged QC；旧输出没有此列时退回检查 degenerate_faces）
 ```
 
 ## 10. 构建整耳并统一坐标系
@@ -311,7 +314,7 @@ degenerate_faces == 0
 python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
 ```
 
-再建立保守的共享边修补层。它只修补局部 WARNING：双方均为修补点、连续长度不超过 2、两侧 raw 状态均非 FAIL、存在可信锚点且投影回原始 mesh 后冲突不超过 0.25 mm。它不会放行 raw FAIL 相邻边。
+再建立保守的共享边修补层。它只修补局部 WARNING：双方均为修补点、连续长度不超过 2、存在可信锚点且投影回原始 mesh 后冲突不超过 0.25 mm。通常两侧 raw 状态均不能为 FAIL；唯一例外是低比例 UV 退化已在 salvaged 层完成修补并记录 `degenerate_salvage_accepted=True`、`degenerate_after=0` 的 region。未完成该严格验收的 raw FAIL 仍不会被放行。
 
 ```powershell
 python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
@@ -384,7 +387,7 @@ python -m pytest tests -q
 
 ### 正式全流程批处理
 
-批处理以左耳 `L` 为标准侧：L 输入不变；R 输入在 remesh 前沿默认 X 轴镜像，并反转三角面绕序。原始输入不改写，标准化 PLY、landmark 与审计 JSON 保存于 `output/canonical_inputs_r24/`。R 样本仍保留 `_R` 标签，但其几何已处于 canonical L 坐标系。
+批处理以左耳 `L` 为标准侧：L 输入不变；R 输入在 remesh 前沿默认 X 轴镜像，并反转三角面绕序。原始输入不改写。桌面隔离正式批处理将标准化 PLY、landmark 与审计 JSON 保存于 `<output-root>/canonical_inputs_r24/`；未传 `--output-root` 的 legacy CLI 模式才保存于 `output/canonical_inputs_r24/`。R 样本仍保留 `_R` 标签，但其几何已处于 canonical L 坐标系。
 
 扫描 `data/clean_mesh/` 与 `data/landmarks/` 中所有同名配对样本，并依次运行 remesh、salvage、整耳 Weld repair、GPA 对齐与 GPA-PCA：
 
@@ -406,7 +409,53 @@ python scripts/run_full_pipeline.py --skip-remesh-qc
 python scripts/run_full_pipeline.py --reference-sample T076_L
 ```
 
-W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整耳 PCA 的可信输入是：
+### 桌面软件的隔离运行
+
+桌面软件启动正式批处理时必须使用隔离模式，避免与旧的共享 `output/...` 目录互相覆盖。`--output-root` 是 opt-in 参数：只有显式传入才启用；目标目录必须不存在，或完全为空（不能含任何文件或子目录）。进程认领该目录时会原子创建 `<output-root>/.pipeline-reservation`；若进程崩溃，该标记会有意保留并使目录保持非空，下一次必须改用新的运行目录。正式运行使用：
+
+```powershell
+python scripts/run_full_pipeline.py `
+  --reference-sample T076_L `
+  --output-root output/pipeline_runs/full28_T076_20260715
+```
+
+上面命令未另传 `--run_dir`，因此该 `output-root` 同时容纳所有 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
+
+```text
+<output-root>/
+  .pipeline-reservation
+  manifest.json
+  pipeline_batch_summary.csv
+  pipeline_run_summary.csv
+  pipeline_run.log
+  canonical_inputs_r24/
+  parameterized_points_r24/{raw,repaired,salvaged}/
+  remesh_r24/{raw,repaired,salvaged}/
+  remesh_qc_r24/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_T076_L}/
+  pca_gpa_r24/
+  pca_reference_T076_L_r24/
+```
+
+固定参考耳目录名跟随实际的 `--reference-sample`：隔离模式使用 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`。上面的 `T076_L` 是正式示例；未选择其他参考样本时，目录名仍以 `T076_L` 为默认形式。
+
+不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向各阶段输出，旧命令与 `--run_dir` 工作流保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和全部阶段产物都必须位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
+
+W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整耳 PCA 的可信输入必须与运行模式对应。
+
+桌面软件隔离模式（传入 `--output-root`）读取：
+
+```text
+<output-root>/whole_ear_r24/aligned_gpa/<sample>_aligned_whole_ear_points.csv
+<output-root>/whole_ear_r24/aligned_gpa/<sample>_aligned_whole_ear_faces.csv
+<output-root>/whole_ear_r24/aligned_gpa/alignment_qc_summary.csv
+
+<output-root>/whole_ear_r24/aligned_reference_T076_L/<sample>_aligned_whole_ear_points.csv
+<output-root>/whole_ear_r24/aligned_reference_T076_L/<sample>_aligned_whole_ear_faces.csv
+<output-root>/whole_ear_r24/aligned_reference_T076_L/alignment_qc_summary.csv
+```
+
+未传 `--output-root` 的 legacy CLI 模式才读取原有固定路径：
 
 ```text
 output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
@@ -414,7 +463,7 @@ output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
 output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
 ```
 
-固定参考耳分支对应读取：
+其中 legacy CLI 的固定参考耳分支对应读取：
 
 ```text
 output/whole_ear_r24/aligned_reference_weld_repaired/<sample>_aligned_whole_ear_points.csv
@@ -428,7 +477,13 @@ GPA 坐标系适用于群体 PCA 与平均耳；固定参考耳坐标系适用�
 
 只有上游 `weld_repaired` 的 `weld_qc_summary.csv` 中 `pca_ready=True`、`input_layer=weld_repaired`，且对齐 QC 为 PASS 的样本可以进入正式 PCA。W3 还会逐样本验证有限坐标、`global_vertex_id` 点序和 faces 完全一致；不合格样本会记录到 `pca_input_manifest.csv`，不会静默混入。
 
-运行命令：
+单独重跑 PCA 时也必须保持同一模式。隔离模式使用本次运行的 `<output-root>`，不能写回共享目录：
+
+```powershell
+python scripts/build_average_ear.py --aligned_dir <output-root>/whole_ear_r24/aligned_gpa --weld_dir <output-root>/whole_ear_r24/weld_repaired --out_dir <output-root>/pca_gpa_r24 --variance_threshold 0.75
+```
+
+固定参考耳分支将上例的 `aligned_gpa` 与 `pca_gpa_r24` 分别替换为 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；正式 `T076_L` 示例对应 `aligned_reference_T076_L` 与 `pca_reference_T076_L_r24`。以下命令仅用于未传 `--output-root` 的 legacy CLI 模式：
 
 ```powershell
 python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_weld_repaired --weld_dir output/whole_ear_r24/weld_repaired --out_dir output/w3_pca_r24 --variance_threshold 0.75

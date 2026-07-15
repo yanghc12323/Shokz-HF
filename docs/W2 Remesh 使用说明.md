@@ -40,7 +40,7 @@ sample_point_count = 325
 remesh_face_count = 576
 ```
 
-T100_L 已退出当前正式批次，历史上的退化面问题仅保留为诊断案例。如果任意新样本出现 `degenerate_faces > 0`，说明 UV 面片已经退化，不能仅靠补点进入 PCA。
+T100_L 已退出当前正式批次，历史上的退化面问题仅保留为诊断案例。若新样本出现 `degenerate_faces > 0`，raw 仍为 FAIL；但原始退化比例不超过 1.5% 时，salvaged 层会尝试局部 UV 修补。只有修补后 `degenerate_after=0` 且最终几何验证通过，才可能继续进入整耳与 PCA 门禁。
 
 ## 3. VSCode 命令行运行方式
 
@@ -59,6 +59,38 @@ pip install -r requirements.txt
 ```
 
 5. 运行 remesh。
+
+### 正式隔离全流程（桌面软件）
+
+桌面软件执行从 W2 到 W3 的正式批处理时必须使用隔离模式，不能与旧的共享 `output/...` 目录混用。`--output-root` 是 opt-in 参数，只有显式传入才生效；指定目录必须不存在，或完全为空（不能含任何文件或子目录）。进程会原子创建 `<output-root>/.pipeline-reservation` 认领该目录；崩溃后标记有意保留，目录因此不再为空，下一次必须使用新的运行目录。使用以下正式命令：
+
+```powershell
+python scripts/run_full_pipeline.py `
+  --reference-sample T076_L `
+  --output-root output/pipeline_runs/full28_T076_20260715
+```
+
+此命令没有额外传 `--run_dir`，因此 `<output-root>` 集中保存全部 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
+
+```text
+<output-root>/
+  .pipeline-reservation
+  manifest.json
+  pipeline_batch_summary.csv
+  pipeline_run_summary.csv
+  pipeline_run.log
+  canonical_inputs_r24/
+  parameterized_points_r24/{raw,repaired,salvaged}/
+  remesh_r24/{raw,repaired,salvaged}/
+  remesh_qc_r24/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_T076_L}/
+  pca_gpa_r24/
+  pca_reference_T076_L_r24/
+```
+
+固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；上面的 `T076_L` 是正式示例，未选择其他参考样本时仍使用该默认目录名。
+
+不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向 W2、QC、Weld、对齐或 PCA 的阶段目录，旧命令和 `--run_dir` 语义保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和阶段产物都位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
 
 ## 4. 运行 Remesh
 
@@ -125,9 +157,11 @@ salvage 默认限制：
 
 ```text
 --max_salvage_unmapped_ratio 0.35
-degenerate_faces > 0 时不 salvage
+--max_salvage_degenerate_ratio 0.015
+raw degenerate ratio > 1.5% 时不尝试 UV 修补
 unmapped 比例超过 0.35 时不 salvage
-salvage_accepted=True 只表示抢救成功，不等同于 raw PASS
+退化面数量不设绝对门槛；比例合格后在 salvaged 层修补
+salvage_accepted=True 表示无 unmapped、degenerate_after=0、r24 最终面有效且 r48 覆盖验证通过，不等同于 raw PASS
 ```
 
 ## 5. 运行 QC 可视化
@@ -159,7 +193,7 @@ output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
 
 1. raw 图显示未修补前的原始映射状态，红色叉号表示 raw unmapped 点。
 2. repaired 图显示补点后的状态，橙色三角表示 repaired 点，红色叉号表示仍未修补点。
-3. salvaged 图显示 raw FAIL 保守抢救后的状态；如果没有满足安全限制，会保留未修补点并在 summary 中写明原因。
+3. salvaged 图显示 raw FAIL 保守抢救后的状态；若进行了 UV 修补，标题会显示 `degenerate=修补前->修补后`，右侧为修补后的 UV 图。
 
 正式批处理默认也遵循此诊断原则：即使一个样本的最终 `salvaged` 状态为 FAIL，仍会生成该样本的三层 QC 图。该 FAIL 状态只阻止样本进入后续 Weld、刚体对齐和 PCA，不应阻止失败原因的可视化。
 4. 三张图都包含 3D patch faces、三条 boundary path、三个 landmark 点、2D UV patch 和 template sample 点。
@@ -168,7 +202,7 @@ QC 图的用途是定位问题原因，而不是直接调阈值。
 
 ## 6. 当前 QC 结果查看方式
 
-注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING；salvaged 层会在 `degenerate_faces == 0` 且 raw unmapped 比例不超过 `--max_salvage_unmapped_ratio` 时，对 raw FAIL 尝试同一套角点替换和平滑插值。
+注意：remesh CLI 与 QC 可视化使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。repaired 层只处理 raw WARNING；salvaged 层会在 raw unmapped 比例不超过 `--max_salvage_unmapped_ratio` 且 raw degenerate ratio 不超过 `--max_salvage_degenerate_ratio` 时，先尝试局部 UV 修补，再执行角点替换和平滑插值。
 
 当前结果以最新 CSV 为准：
 
@@ -186,12 +220,18 @@ salvaged_unmapped_count
 salvage_attempted
 salvage_accepted
 salvage_rejection_reason
-degenerate_faces
+degenerate_ratio
+degenerate_before
+degenerate_after
+degenerate_salvage_attempted
+degenerate_salvage_accepted
+degenerate_salvage_method
+degenerate_salvage_rejection_reason
 patch_face_count
 mesh_exported
 ```
 
-r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐；但 `salvage_accepted=True` 仍只是“抢救后可导出”，不等于 raw 映射质量本身已经可靠。`salvaged` 是 W2 不可改写的 region 级基线，不直接作为 PCA 文件；后续仍需经过整耳焊接、共享边修补、刚体对齐和相应 QC。
+r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替换和平滑插值补齐；比例合格的 source UV 退化会在 salvaged 层先做局部 UV 松弛并重新映射。`degenerate_faces` 是原始诊断值，`degenerate_after` 是最终门禁值。`salvaged` 是 W2 不可改写的 region 级基线，不直接作为 PCA 文件；后续仍需经过整耳焊接、共享边修补、刚体对齐和相应 QC。
 
 ## 7. QC 判定规则
 
@@ -201,12 +241,12 @@ r24 repaired/salvaged 输出说明：少量 unmapped 可以通过 landmark 替�
 status == PASS
 sample_point_count == expected_point_count
 unmapped_count == 0
-degenerate_faces == 0
+degenerate_after == 0（旧输出没有该列时检查 degenerate_faces）
 ```
 
 如果 `unmapped_count > 0`，对应的 `x/y/z` 会出现 NaN，该 region 不能直接进入 PCA。
 
-`flipped_faces` 不能单独作为失败依据。某些 PASS region 也可能有较高 `flipped_faces`，需要结合 `unmapped_count` 和 `degenerate_faces` 判断。
+`flipped_faces` 不能单独作为失败依据。某些 PASS region 也可能有较高 `flipped_faces`，需要结合 `unmapped_count`、`degenerate_after` 和最终模板面质量判断。
 
 ## 8. 当前问题判断
 
@@ -269,7 +309,7 @@ python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/sa
 python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
 ```
 
-修补层只处理 baseline 的局部 WARNING 共享边：两侧 raw region 不能 FAIL、没有退化面、冲突必须是 1--2 个连续的 repaired-only 点且两侧都有可信锚点。程序按锚点插值、投影回原始 mesh，并同时更新两个相邻 region 的边界副本；`<sample>_edge_repair_qc.csv` 会完整记录是否修补、锚点、投影距离与拒绝原因。缺失或非有限候选坐标会写为 `non_finite_candidate`，不做自动修补。启用修补时不指定 `--out_dir` 会默认输出 `weld_repaired`，且程序拒绝覆盖 `salvaged` 基线。
+修补层只处理 baseline 的局部 WARNING 共享边：通常两侧 raw region 不能 FAIL、最终不能有退化面、冲突必须是 1--2 个连续的 repaired-only 点且两侧都有可信锚点。唯一例外是 raw FAIL 由低比例 UV 退化引起、且 `degenerate_salvage_accepted=True`、`degenerate_after=0` 的 region；它已在 salvaged 层完成严格验收，可参与共享边修补。程序按锚点插值、投影回原始 mesh，并同时更新两个相邻 region 的边界副本；`<sample>_edge_repair_qc.csv` 会完整记录是否修补、锚点、投影距离与拒绝原因。缺失或非有限候选坐标会写为 `non_finite_candidate`，不做自动修补。启用修补时不指定 `--out_dir` 会默认输出 `weld_repaired`，且程序拒绝覆盖 `salvaged` 基线。
 
 历史 12 样本批次中，T066_L、T094_L 与 T097_L 的 baseline WARNING 经保守共享边修补后转为 PASS；当前 `weld_repaired` 为 11 PASS/PCA_READY、1 FAIL。T094_L 的 L20-L21 index 1（0.4135 mm）和 T097_L 的 L21-L29 index 23（0.3098 mm）均修补为 0。T049_L 的 L13-L17 因相邻 T003 raw FAIL 而保留 FAIL，不会自动纳入 PCA。28 样本全流程完成后，应以新的 batch summary 覆盖本段历史统计。
 
