@@ -106,3 +106,25 @@ def test_read_new_events_waits_for_a_complete_final_jsonl_line(tmp_path: Path):
     with controller.event_path.open("a", encoding="utf-8") as stream:
         stream.write(',"stage":"REMESH"}\n')
     assert controller.read_new_events() == [{"event": "stage_started", "stage": "REMESH"}]
+
+
+def test_start_recovery_runs_weld_from_parent_artifacts_only(tmp_path: Path):
+    from desktop_app.models import AttemptRecord
+    from desktop_app.recovery_service import RecoveryOption
+
+    project = _project(tmp_path)
+    parent = AttemptRecord.create(project.root, "run-parent", "attempt-001")
+    parent_salvaged = parent.artifacts_dir / "remesh_r24" / "salvaged"
+    parent_salvaged.mkdir(parents=True)
+    (parent.artifacts_dir / "manifest.json").write_text(
+        '{"status":"ERROR","output_scope":"isolated","outputs":{"salvaged_dir":"remesh_r24/salvaged"}}',
+        encoding="utf-8",
+    )
+    controller = RunController(process_factory=FakeProcess)
+
+    child = controller.start_recovery(project, parent, RecoveryOption.WELD)
+
+    assert child.parent_attempt_id == parent.attempt_id
+    assert str(parent_salvaged) in controller.last_command
+    assert str(child.artifacts_dir / "whole_ear_r24" / "weld_repaired") in controller.last_command
+    assert controller.process.started

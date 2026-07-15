@@ -12,6 +12,7 @@ from typing import Callable
 from PySide6.QtCore import QObject, QProcess, Signal
 
 from desktop_app.models import AttemptRecord, ProjectRecord, RunOptions, RunStatus
+from desktop_app.recovery_service import RecoveryOption, RecoveryService
 
 
 class RunController(QObject):
@@ -81,6 +82,42 @@ class RunController(QObject):
         self.last_command = [sys.executable, *arguments]
         self.attempt_changed.emit(running)
         return running
+
+    def start_recovery(
+        self,
+        project: ProjectRecord,
+        parent: AttemptRecord,
+        option: RecoveryOption,
+    ) -> AttemptRecord:
+        if self.process is not None:
+            raise RuntimeError("another local run is already active")
+        service = RecoveryService()
+        child = service.create_attempt(parent, option)
+        arguments = service.build_command(project, parent, child, option)
+        running = replace(child, status=RunStatus.RUNNING)
+        self._write_state(running)
+        process = self._process_factory()
+        process.setProgram(sys.executable)
+        process.setArguments(arguments)
+        process.setWorkingDirectory(str(project.root))
+        finished_signal = getattr(process, "finished", None)
+        if finished_signal is not None:
+            finished_signal.connect(lambda *_: self._finish_recovery())
+        process.start()
+        self.process = process
+        self.active_attempt = running
+        self.last_command = [sys.executable, *arguments]
+        self.attempt_changed.emit(running)
+        return running
+
+    def _finish_recovery(self) -> None:
+        attempt = self._require_attempt()
+        completed = replace(attempt, status=RunStatus.COMPLETED)
+        self.active_attempt = completed
+        self._write_state(completed)
+        self.attempt_changed.emit(completed)
+        self.run_finished.emit(completed)
+        self.process = None
 
     def request_pause(self) -> AttemptRecord:
         return self._set_control_status("PAUSE_REQUESTED", RunStatus.PAUSE_REQUESTED)
