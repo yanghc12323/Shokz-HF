@@ -60,6 +60,23 @@ W2 任务是：
 
 ## 4. 安装依赖
 
+### Windows 桌面软件
+
+安装桌面依赖后，可在开发环境启动中文工程工作台：
+
+```powershell
+python -m pip install -r requirements-desktop.txt
+python -m desktop_app
+```
+
+构建可双击启动的 Windows 程序：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
+```
+
+详细流程见 `docs/桌面工程软件使用说明.md`。原有 CLI 命令仍是分析基线，保持可用。
+
 在 VSCode 中打开项目根目录 `D:\YHC\人头项目` 后，打开 Terminal，运行：
 
 ```powershell
