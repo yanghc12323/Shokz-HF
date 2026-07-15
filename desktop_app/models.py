@@ -38,6 +38,26 @@ class ProjectRecord:
     def inputs_dir(self) -> Path:
         return self.root / "inputs"
 
+    @property
+    def mesh_dir(self) -> Path:
+        return self.inputs_dir / "clean_mesh"
+
+    @property
+    def landmarks_dir(self) -> Path:
+        return self.inputs_dir / "landmarks"
+
+    @property
+    def config_dir(self) -> Path:
+        return self.inputs_dir / "config"
+
+    @property
+    def region_table_path(self) -> Path:
+        return self.config_dir / "region_table.csv"
+
+    @property
+    def edge_controls_path(self) -> Path:
+        return self.config_dir / "edge_control_points.csv"
+
 
 @dataclass(frozen=True)
 class AttemptRecord:
