@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from desktop_app.models import ProjectRecord, ValidationIssue
+from desktop_app.models import ProjectRecord, RunOptions, ValidationIssue
 
 
 def _page(title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
@@ -102,6 +102,7 @@ class ProjectWizard(QWidget):
 
     project_requested = Signal(str, str)
     import_requested = Signal(str, str, str, str)
+    start_requested = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -171,12 +172,12 @@ class ProjectWizard(QWidget):
         layout.addStretch(1)
         return page
 
-    @staticmethod
-    def _build_options_page() -> QWidget:
+    def _build_options_page(self) -> QWidget:
         page, layout = _page("运行参数", "第一版仅允许选择现有配置并调整少量运行参数；配置表请在项目文件夹中维护。")
         card = QFrame()
         card.setObjectName("contentCard")
         form = QFormLayout(card)
+        editors: list[QLineEdit] = []
         for title, value in (
             ("最大 Salvage 未映射比例", "0.35"),
             ("最大 Salvage 退化比例", "0.015"),
@@ -185,9 +186,29 @@ class ProjectWizard(QWidget):
         ):
             editor = QLineEdit(value)
             form.addRow(title, editor)
+            editors.append(editor)
+        (
+            self.max_unmapped_ratio,
+            self.max_degenerate_ratio,
+            self.pca_variance_threshold,
+            self.reference_sample,
+        ) = editors
+        self.start_analysis_button = QPushButton("一键开始分析")
+        self.start_analysis_button.clicked.connect(self._emit_run_options)
+        form.addRow("", self.start_analysis_button)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
+
+    def _emit_run_options(self) -> None:
+        self.start_requested.emit(
+            RunOptions(
+                max_salvage_unmapped_ratio=float(self.max_unmapped_ratio.text()),
+                max_salvage_degenerate_ratio=float(self.max_degenerate_ratio.text()),
+                pca_variance_threshold=float(self.pca_variance_threshold.text()),
+                reference_sample=self.reference_sample.text().strip() or None,
+            )
+        )
 
     @staticmethod
     def _build_monitor_placeholder() -> QWidget:

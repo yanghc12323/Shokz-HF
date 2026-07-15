@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop_app.models import ProjectRecord
+from desktop_app.artifact_indexer import ArtifactIndexer
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
 from desktop_app.ui.project_wizard import ProjectWizard
@@ -71,6 +72,8 @@ class MainWindow(QMainWindow):
                 Path(mesh), Path(landmarks), Path(regions), Path(edges)
             )
         )
+        self.wizard.start_requested.connect(self.start_analysis)
+        self.run_controller.run_finished.connect(self.load_completed_attempt)
         self._apply_style()
 
     def _build_sidebar(self) -> QWidget:
@@ -157,6 +160,18 @@ class MainWindow(QMainWindow):
         if self.workflow.can_advance_to("options"):
             self.workflow.go_to("options")
         return project
+
+    def start_analysis(self, options) -> None:
+        if self.project is None or not self.workflow.can_advance_to("monitor"):
+            raise RuntimeError("当前项目未通过自动校验，无法开始分析")
+        self.run_controller.start(self.project, options)
+        self.workflow.go_to("monitor")
+
+    def load_completed_attempt(self, attempt) -> None:
+        if str(attempt.status) != "COMPLETED":
+            return
+        self.result_workbench.set_attempt(ArtifactIndexer().index(attempt))
+        self.content_stack.setCurrentWidget(self.result_workbench)
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""

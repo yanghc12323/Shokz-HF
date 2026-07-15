@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from PySide6.QtWidgets import QApplication
 
@@ -75,6 +76,40 @@ def test_import_inputs_runs_validation_and_opens_options_when_valid(qtbot, tmp_p
     assert project.mesh_dir.is_dir()
     assert window.workflow.can_advance_to("options")
     assert window.workflow.current_page == "options"
+
+    window.wizard.start_analysis_button.click()
+
+    assert window.run_controller.active_attempt is not None
+    assert window.workflow.current_page == "monitor"
+    assert "RUNNING" in window.run_monitor.status_label.text()
+
+    window.run_controller.event_received.emit(
+        {"event": "sample_started", "stage": "REMESH", "sample_tag": "T001_L"}
+    )
+
+    assert "T001_L" in window.run_monitor.event_label.text()
+
+    window.run_controller.event_path.write_text(
+        '{"event":"stage_started","stage":"WELD"}\n', encoding="utf-8"
+    )
+    window.run_monitor.poll_events()
+
+    assert "WELD" in window.run_monitor.event_label.text()
+
+    attempt = window.run_controller.active_attempt
+    attempt.artifacts_dir.mkdir()
+    (attempt.artifacts_dir / "manifest.json").write_text(
+        json.dumps({"status": "COMPLETED", "output_scope": "isolated", "outputs": {}}),
+        encoding="utf-8",
+    )
+    (attempt.artifacts_dir / "pipeline_batch_summary.csv").write_text(
+        "sample_tag,discovery,remesh,salvage,weld,alignment,pca_included,reason\n"
+        "T001_L,READY,PASS,PASS,PASS,PASS,YES,\n",
+        encoding="utf-8",
+    )
+    window.run_controller.refresh_terminal_status()
+
+    assert window.result_workbench.index is not None
 
 
 def test_guided_pages_follow_the_approved_sequence(qtbot):
