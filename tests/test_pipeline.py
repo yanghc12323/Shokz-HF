@@ -153,6 +153,42 @@ def test_full_pipeline_execute_finalizes_manifest_on_error(tmp_path: Path, monke
     assert "boom" in manifest["error"]
 
 
+def test_full_pipeline_execute_marks_manifest_cancelled(tmp_path: Path, monkeypatch):
+    import scripts.run_full_pipeline as cli
+    from ear_param.run_control import RunCancelled
+
+    mesh_dir = tmp_path / "clean_mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    config_dir = tmp_path / "config"
+    mesh_dir.mkdir()
+    landmarks_dir.mkdir()
+    config_dir.mkdir()
+    regions = config_dir / "region_table.csv"
+    regions.write_text(
+        "region_id,lm_a,lm_b,lm_c,resolution\nT001,L1,L2,L3,24\n",
+        encoding="utf-8",
+    )
+    root = tmp_path / "cancelled_run"
+    args = cli.build_parser().parse_args([
+        "--mesh_dir", str(mesh_dir),
+        "--landmarks_dir", str(landmarks_dir),
+        "--regions", str(regions),
+        "--output-root", str(root),
+    ])
+    monkeypatch.setattr(cli, "build_subprocess_stages", lambda config: object())
+    monkeypatch.setattr(
+        cli,
+        "run_pipeline",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RunCancelled("cancelled")),
+    )
+
+    assert cli.execute(args) is None
+
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "CANCELLED"
+    assert manifest["error"] == "cancelled"
+
+
 def test_full_pipeline_execute_finalizes_completed_manifest_and_prints_summary(
     tmp_path: Path,
     monkeypatch,
@@ -359,6 +395,7 @@ def test_pipeline_config_appends_new_fields_after_legacy_field_order():
         "max_salvage_unmapped_ratio",
         "pca_variance_threshold",
         "event_reporter",
+        "checkpoint",
     )
 
 
@@ -403,6 +440,21 @@ def test_full_pipeline_cli_applies_salvage_and_pca_thresholds(tmp_path: Path):
 
     assert config.max_salvage_unmapped_ratio == 0.28
     assert config.pca_variance_threshold == 0.82
+
+
+def test_full_pipeline_cli_writes_jsonl_events_when_requested(tmp_path: Path):
+    from scripts.run_full_pipeline import build_parser, build_pipeline_config
+
+    event_path = tmp_path / "events.jsonl"
+    args = build_parser().parse_args(["--event-log", str(event_path)])
+
+    config, _, _ = build_pipeline_config(args)
+
+    assert config.event_reporter is not None
+    config.event_reporter("stage_started", {"stage": "REMESH"})
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    assert payload["event"] == "stage_started"
+    assert payload["stage"] == "REMESH"
 
 
 def test_pipeline_config_keeps_legacy_remesh_mesh_defaults(tmp_path: Path):

@@ -72,6 +72,7 @@ class PipelineConfig:
     max_salvage_unmapped_ratio: float = 0.35
     pca_variance_threshold: float = 0.75
     event_reporter: Callable[[str, dict[str, object]], None] | None = None
+    checkpoint: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,7 @@ def run_pipeline(
         if row["discovery"] != "READY":
             continue
         sample_tag = str(row["sample_tag"])
+        _checkpoint(config)
         _report(config, f"{sample_tag} REMESH ...")
         _emit(config, "sample_started", sample_tag=sample_tag, stage="REMESH")
         try:
@@ -209,6 +211,7 @@ def run_pipeline(
             records.at[index, "remesh_qc"] = "SKIPPED_BY_OPTION"
         else:
             try:
+                _checkpoint(config)
                 _report(config, f"{sample_tag} REMESH_QC ...")
                 _emit(config, "sample_started", sample_tag=sample_tag, stage="REMESH_QC")
                 records.at[index, "remesh_qc"] = str(
@@ -239,6 +242,7 @@ def run_pipeline(
 
     weld_tags = records.loc[records["salvage"] == "PASS", "sample_tag"].astype(str).tolist()
     if weld_tags:
+        _checkpoint(config)
         _report(config, f"WELD_REPAIRED ... {len(weld_tags)} samples")
         _emit(config, "stage_started", stage="WELD", sample_count=len(weld_tags))
         try:
@@ -256,6 +260,7 @@ def run_pipeline(
 
     alignment_tags = records.loc[records["weld"] == "PASS", "sample_tag"].astype(str).tolist()
     if alignment_tags:
+        _checkpoint(config)
         _report(config, f"ALIGNMENT ... {len(alignment_tags)} samples")
         _emit(config, "stage_started", stage="ALIGNMENT", sample_count=len(alignment_tags))
         try:
@@ -279,6 +284,7 @@ def run_pipeline(
     elif config.skip_pca:
         pca_status, pca_result = "SKIPPED_BY_OPTION", {"included_tags": []}
     else:
+        _checkpoint(config)
         _report(config, f"GPA PCA ... {len(pca_tags)} aligned samples")
         _emit(config, "stage_started", stage="GPA_PCA", sample_count=len(pca_tags))
         try:
@@ -329,6 +335,7 @@ def _run_fixed_reference_branch(
         return "SKIPPED_REFERENCE_NOT_WELD_PASS", {"included_tags": []}
 
     _report(config, f"FIXED_REFERENCE_ALIGNMENT ... {len(weld_tags)} samples")
+    _checkpoint(config)
     _emit(config, "stage_started", stage="FIXED_REFERENCE_ALIGNMENT", sample_count=len(weld_tags))
     try:
         _apply_reference_alignment_statuses(
@@ -363,6 +370,7 @@ def _run_fixed_reference_branch(
         return "SKIPPED_BY_OPTION", {"included_tags": []}
 
     _report(config, f"FIXED_REFERENCE PCA ... {len(reference_tags)} aligned samples")
+    _checkpoint(config)
     _emit(config, "stage_started", stage="FIXED_REFERENCE_PCA", sample_count=len(reference_tags))
     try:
         result = stage_functions.fixed_reference_pca_batch()
@@ -648,3 +656,8 @@ def _report(config: PipelineConfig, message: str) -> None:
 def _emit(config: PipelineConfig, event: str, **fields: object) -> None:
     if config.event_reporter is not None:
         config.event_reporter(event, fields)
+
+
+def _checkpoint(config: PipelineConfig) -> None:
+    if config.checkpoint is not None:
+        config.checkpoint()

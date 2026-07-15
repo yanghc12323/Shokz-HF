@@ -19,8 +19,10 @@ from ear_param.pipeline import (
     run_pipeline,
     write_pipeline_outputs,
 )
+from ear_param.events import JsonlEventWriter
 from ear_param.run_artifacts import PipelineOutputLayout, prepare_empty_output_root
 from ear_param.run_manifest import create_run_manifest, finish_manifest, write_manifest
+from ear_param.run_control import FileRunControl, RunCancelled
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root",
         help="Optional isolated root for every stage output; must be empty.",
     )
+    parser.add_argument("--event-log", help="Optional JSONL event log for a desktop run.")
+    parser.add_argument("--control-path", help="Optional desktop pause/cancel control file.")
     return parser
 
 
@@ -106,6 +110,13 @@ def build_pipeline_config(
         "reference_sample": args.reference_sample,
         "reporter": print,
     }
+    if args.event_log:
+        writer = JsonlEventWriter(Path(args.event_log))
+        config_kwargs["event_reporter"] = (
+            lambda event, fields: writer.emit(event, **fields)
+        )
+    if args.control_path:
+        config_kwargs["checkpoint"] = FileRunControl(Path(args.control_path)).checkpoint
     if layout is not None:
         config_kwargs.update(layout.pipeline_config_kwargs())
     return PipelineConfig(**config_kwargs), run_dir, layout
@@ -119,7 +130,7 @@ def _print_final_summary(result: PipelineResult, run_dir: Path) -> None:
     print(f"[Pipeline] Run artifacts: {run_dir}")
 
 
-def execute(args: argparse.Namespace) -> PipelineResult:
+def execute(args: argparse.Namespace) -> PipelineResult | None:
     config, run_dir, layout = build_pipeline_config(args)
     if layout is not None:
         prepare_empty_output_root(layout.output_root)
@@ -135,6 +146,10 @@ def execute(args: argparse.Namespace) -> PipelineResult:
     try:
         result = run_pipeline(config, stage_functions=build_subprocess_stages(config))
         write_pipeline_outputs(result, run_dir)
+    except RunCancelled as exc:
+        finish_manifest(manifest_path, status="CANCELLED", error=str(exc))
+        print("[Pipeline] Cancelled by desktop controller.")
+        return None
     except BaseException as exc:
         finish_manifest(manifest_path, status="ERROR", error=str(exc))
         raise
@@ -144,7 +159,9 @@ def execute(args: argparse.Namespace) -> PipelineResult:
 
 
 def main() -> None:
-    execute(build_parser().parse_args())
+    result = execute(build_parser().parse_args())
+    if result is None:
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
