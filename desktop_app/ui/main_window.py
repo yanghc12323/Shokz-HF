@@ -21,9 +21,11 @@ from desktop_app.artifact_indexer import ArtifactIndexer
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
 from desktop_app.ui.project_wizard import ProjectWizard
+from desktop_app.ui.expert_mode import ExpertMode
 from desktop_app.ui.result_workbench import ResultWorkbench
 from desktop_app.ui.run_monitor import RunMonitor
 from desktop_app.validation_service import ValidationService
+from desktop_app.recovery_service import RecoveryService
 
 
 class MainWindow(QMainWindow):
@@ -60,9 +62,10 @@ class MainWindow(QMainWindow):
         self.wizard.monitor_placeholder.deleteLater()
         self.wizard.stack.insertWidget(4, self.run_monitor)
         self.result_workbench = ResultWorkbench()
+        self.expert_mode = ExpertMode(RecoveryService(), run_controller)
         self.content_stack.addWidget(self.wizard)
         self.content_stack.addWidget(self.result_workbench)
-        self.content_stack.addWidget(self._placeholder("专家模式", "按阶段选择已验证的输入执行重跑。"))
+        self.content_stack.addWidget(self.expert_mode)
         self.content_stack.addWidget(self._placeholder("运行记录", "查看本项目的运行、失败原因和恢复尝试。"))
         root_layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
@@ -132,6 +135,7 @@ class MainWindow(QMainWindow):
 
     def open_project(self, project: ProjectRecord) -> None:
         self.project = project
+        self.expert_mode.set_project(project)
         issues = self.validation_service.validate(project)
         self.validation_page.set_issues(issues)
         self.workflow.set_project(project, issues)

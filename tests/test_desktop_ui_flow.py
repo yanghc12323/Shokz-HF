@@ -126,3 +126,4 @@ def test_guided_pages_follow_the_approved_sequence(qtbot):
     assert window.navigation_labels == ("项目", "分析流程", "结果复核", "专家模式", "运行记录")
     assert window.wizard.stack.widget(4) is window.run_monitor
     assert window.content_stack.widget(1) is window.result_workbench
+    assert window.content_stack.widget(2) is window.expert_mode
