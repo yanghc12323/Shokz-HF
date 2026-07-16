@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFormLayout,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -132,16 +133,33 @@ class ProjectWizard(QWidget):
         form = QFormLayout(card)
         self.project_name = QLineEdit()
         self.project_name.setPlaceholderText("例如：2026 年 7 月耳廓批次")
+        self.project_name.setToolTip("项目名称：用于在软件中识别这一批分析，不会修改原始文件名。")
         self.project_root = QLineEdit()
-        self.project_root.setPlaceholderText("选择空的项目工作目录")
+        self.project_root.setReadOnly(True)
+        self.project_root.setPlaceholderText("点击“浏览文件夹”选择一个空目录")
+        self.project_root.setToolTip("项目工作目录：软件会在此保存输入副本、运行记录和分析结果。")
+        self.browse_project_root_button = QPushButton("浏览文件夹…")
+        self.browse_project_root_button.clicked.connect(self._browse_project_root)
+        root_picker = QWidget()
+        root_layout = QHBoxLayout(root_picker)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.addWidget(self.project_root, 1)
+        root_layout.addWidget(self.browse_project_root_button)
         button = QPushButton("创建项目")
         button.clicked.connect(lambda: self.project_requested.emit(self.project_root.text(), self.project_name.text()))
         form.addRow("项目名称", self.project_name)
-        form.addRow("工作目录", self.project_root)
+        form.addRow("说明", QLabel("项目名称用于区分分析批次；可以使用中文，不会影响样本文件名。"))
+        form.addRow("工作目录", root_picker)
+        form.addRow("说明", QLabel("请选择空文件夹。软件将在其中建立项目、复制输入并保存全部结果。"))
         form.addRow("", button)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
+
+    def _browse_project_root(self) -> None:
+        selected = QFileDialog.getExistingDirectory(self, "选择项目工作目录")
+        if selected:
+            self.project_root.setText(selected)
 
     def _build_import_page(self) -> QWidget:
         page, layout = _page("导入数据", "导入后软件只使用项目目录中的副本，原始数据不会被改写。")

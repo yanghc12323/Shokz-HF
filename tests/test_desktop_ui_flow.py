@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from desktop_app.app import create_application
 from desktop_app.project_service import ProjectService
@@ -38,6 +38,23 @@ def test_application_loads_bundled_chinese_font():
     app = create_application([])
 
     assert app.font().family() == "Noto Sans SC"
+
+
+def test_new_project_page_browses_for_workspace_and_explains_fields(qtbot, monkeypatch, tmp_path: Path):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        lambda *_args, **_kwargs: str(tmp_path / "workspace"),
+    )
+
+    window.wizard.browse_project_root_button.click()
+
+    assert window.wizard.project_root.text() == str(tmp_path / "workspace")
+    assert window.wizard.project_root.isReadOnly()
+    assert "项目名称" in window.wizard.project_name.toolTip()
+    assert "工作目录" in window.wizard.project_root.toolTip()
 
 
 def test_options_page_is_blocked_by_validation_error(qtbot, tmp_path: Path):
