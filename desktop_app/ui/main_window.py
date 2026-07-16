@@ -71,8 +71,8 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
         self.wizard.project_requested.connect(self.create_project)
         self.wizard.import_requested.connect(
-            lambda mesh, landmarks, regions, edges: self.import_project_inputs(
-                Path(mesh), Path(landmarks), Path(regions), Path(edges)
+            lambda mesh, landmarks, regions: self.import_project_inputs(
+                Path(mesh), Path(landmarks), Path(regions)
             )
         )
         self.wizard.start_requested.connect(self.start_analysis)
@@ -160,7 +160,6 @@ class MainWindow(QMainWindow):
         mesh_dir: Path,
         landmarks_dir: Path,
         region_table: Path,
-        edge_controls: Path,
     ) -> ProjectRecord:
         if self.project is None:
             raise RuntimeError("请先创建或打开项目")
@@ -169,7 +168,6 @@ class MainWindow(QMainWindow):
             mesh_dir=mesh_dir,
             landmarks_dir=landmarks_dir,
             region_table=region_table,
-            edge_controls=edge_controls,
         )
         self.project = project
         issues = self.validation_service.validate(project)

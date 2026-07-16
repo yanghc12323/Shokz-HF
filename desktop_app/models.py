@@ -62,11 +62,6 @@ class ProjectRecord:
     def region_table_path(self) -> Path:
         return self.config_dir / "region_table.csv"
 
-    @property
-    def edge_controls_path(self) -> Path:
-        return self.config_dir / "edge_control_points.csv"
-
-
 @dataclass(frozen=True)
 class AttemptRecord:
     project_root: Path

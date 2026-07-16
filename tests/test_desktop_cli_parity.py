@@ -31,10 +31,6 @@ def project_with_copied_inputs(tmp_path: Path):
         "region_id,lm_a,lm_b,lm_c,resolution\nR01,L1,L2,L3,24\n",
         encoding="utf-8",
     )
-    project.edge_controls_path.write_text(
-        "edge_start,edge_end,control_point\nL1,L2,M1\n",
-        encoding="utf-8",
-    )
     return project
 
 

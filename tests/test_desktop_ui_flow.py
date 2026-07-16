@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import inspect
 
 from PySide6.QtWidgets import QApplication, QFileDialog
 
@@ -57,6 +58,31 @@ def test_new_project_page_browses_for_workspace_and_explains_fields(qtbot, monke
     assert "工作目录" in window.wizard.project_root.toolTip()
 
 
+def test_import_page_uses_browse_controls_and_has_no_control_point_field(qtbot, monkeypatch, tmp_path: Path):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    mesh_dir = tmp_path / "mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    region_table = tmp_path / "region_table.csv"
+    paths = iter((str(mesh_dir), str(landmarks_dir)))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *_args, **_kwargs: next(paths))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args, **_kwargs: (str(region_table), "CSV 文件 (*.csv)"))
+
+    window.wizard.browse_mesh_source_button.click()
+    window.wizard.browse_landmarks_source_button.click()
+    window.wizard.browse_region_source_button.click()
+
+    assert window.wizard.mesh_source.text() == str(mesh_dir)
+    assert window.wizard.landmarks_source.text() == str(landmarks_dir)
+    assert window.wizard.region_source.text() == str(region_table)
+    assert all(field.isReadOnly() for field in (window.wizard.mesh_source, window.wizard.landmarks_source, window.wizard.region_source))
+    assert not hasattr(window.wizard, "edge_controls_source")
+
+
+def test_desktop_import_api_does_not_require_control_point_config():
+    assert "edge_controls" not in inspect.signature(ProjectService.import_inputs).parameters
+
+
 def test_project_fields_use_a_dark_text_color(qtbot):
     window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
     qtbot.addWidget(window)
@@ -112,14 +138,12 @@ def test_import_inputs_runs_validation_and_opens_options_when_valid(qtbot, tmp_p
     (mesh_dir / "T001_L.ply").write_bytes(b"ply\nformat ascii 1.0\nend_header\n")
     (landmarks_dir / "T001_L_landmarks.csv").write_text("name,x,y,z\nL1,0,0,0\n", encoding="utf-8")
     region_table = source / "region_table.csv"
-    edge_controls = source / "edge_control_points.csv"
     region_table.write_text("region_id,resolution\nR01,24\n", encoding="utf-8")
-    edge_controls.write_text("edge_start,edge_end,control_point\nL1,L1,L1\n", encoding="utf-8")
     window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
     qtbot.addWidget(window)
     project = window.create_project(str(tmp_path / "project"), "项目")
 
-    window.import_project_inputs(mesh_dir, landmarks_dir, region_table, edge_controls)
+    window.import_project_inputs(mesh_dir, landmarks_dir, region_table)
 
     assert project.mesh_dir.is_dir()
     assert window.workflow.can_advance_to("options")

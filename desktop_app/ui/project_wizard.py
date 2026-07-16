@@ -108,7 +108,7 @@ class ProjectWizard(QWidget):
     """Visible guided sequence, intentionally separate from expert mode."""
 
     project_requested = Signal(str, str)
-    import_requested = Signal(str, str, str, str)
+    import_requested = Signal(str, str, str)
     start_requested = Signal(object)
 
     def __init__(self) -> None:
@@ -187,29 +187,63 @@ class ProjectWizard(QWidget):
         card = QFrame()
         card.setObjectName("contentCard")
         form = QFormLayout(card)
-        inputs: list[QLineEdit] = []
-        for title, placeholder in (
-            ("网格目录", "包含 .ply 网格的目录"),
-            ("地标目录", "包含 *_landmarks.csv 的目录"),
-            ("区域表", "region_table.csv"),
-            ("边界控制点", "edge_control_points.csv"),
-        ):
-            input_box = QLineEdit()
-            input_box.setPlaceholderText(placeholder)
-            form.addRow(title, input_box)
-            inputs.append(input_box)
-        self.mesh_source, self.landmarks_source, self.region_source, self.edge_controls_source = inputs
+        self.mesh_source, self.browse_mesh_source_button = self._path_picker(
+            "包含 .ply 网格的目录", "浏览文件夹…", self._browse_mesh_source
+        )
+        self.landmarks_source, self.browse_landmarks_source_button = self._path_picker(
+            "包含 *_landmarks.csv 的目录", "浏览文件夹…", self._browse_landmarks_source
+        )
+        self.region_source, self.browse_region_source_button = self._path_picker(
+            "选择 region_table.csv", "浏览文件…", self._browse_region_source
+        )
+        form.addRow("网格目录", self._picker_row(self.mesh_source, self.browse_mesh_source_button))
+        form.addRow("地标目录", self._picker_row(self.landmarks_source, self.browse_landmarks_source_button))
+        form.addRow("区域表", self._picker_row(self.region_source, self.browse_region_source_button))
         button = QPushButton("导入并自动校验")
         button.clicked.connect(
             lambda: self.import_requested.emit(
                 self.mesh_source.text(), self.landmarks_source.text(),
-                self.region_source.text(), self.edge_controls_source.text(),
+                self.region_source.text(),
             )
         )
         form.addRow("", button)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
+
+    @staticmethod
+    def _picker_row(field: QLineEdit, button: QPushButton) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(field, 1)
+        layout.addWidget(button)
+        return row
+
+    @staticmethod
+    def _path_picker(placeholder: str, button_text: str, handler) -> tuple[QLineEdit, QPushButton]:
+        field = QLineEdit()
+        field.setReadOnly(True)
+        field.setPlaceholderText(placeholder)
+        button = QPushButton(button_text)
+        button.clicked.connect(handler)
+        return field, button
+
+    def _browse_mesh_source(self) -> None:
+        self._choose_directory(self.mesh_source, "选择网格目录")
+
+    def _browse_landmarks_source(self) -> None:
+        self._choose_directory(self.landmarks_source, "选择地标目录")
+
+    def _browse_region_source(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(self, "选择区域表", filter="CSV 文件 (*.csv)")
+        if selected:
+            self.region_source.setText(selected)
+
+    def _choose_directory(self, field: QLineEdit, title: str) -> None:
+        selected = QFileDialog.getExistingDirectory(self, title)
+        if selected:
+            field.setText(selected)
 
     def _build_options_page(self) -> QWidget:
         page, layout = _page("运行参数", "第一版仅允许选择现有配置并调整少量运行参数；配置表请在项目文件夹中维护。")

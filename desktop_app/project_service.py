@@ -34,7 +34,6 @@ class ProjectService:
         mesh_dir: Path,
         landmarks_dir: Path,
         region_table: Path,
-        edge_controls: Path,
     ) -> ProjectRecord:
         self._require_project_path(project, project.inputs_dir)
         if project.inputs_dir.exists() and any(project.inputs_dir.iterdir()):
@@ -43,11 +42,10 @@ class ProjectService:
         mesh_dir = Path(mesh_dir)
         landmarks_dir = Path(landmarks_dir)
         region_table = Path(region_table)
-        edge_controls = Path(edge_controls)
         if not mesh_dir.is_dir() or not landmarks_dir.is_dir():
             raise ValueError("mesh and landmark sources must be directories")
-        if not region_table.is_file() or not edge_controls.is_file():
-            raise ValueError("region table and edge controls must be files")
+        if not region_table.is_file():
+            raise ValueError("region table must be a file")
 
         project.mesh_dir.mkdir(parents=True)
         project.landmarks_dir.mkdir(parents=True)
@@ -57,7 +55,6 @@ class ProjectService:
         for path in landmarks_dir.glob("*_landmarks.csv"):
             shutil.copy2(path, project.landmarks_dir / path.name)
         shutil.copy2(region_table, project.region_table_path)
-        shutil.copy2(edge_controls, project.edge_controls_path)
         self._write_metadata(project)
         return project
 

@@ -28,15 +28,6 @@ class ValidationService:
                         )
                     )
         issues.extend(self._validate_region_table(project))
-        if not project.edge_controls_path.is_file():
-            issues.append(
-                ValidationIssue(
-                    "MISSING_EDGE_CONTROLS",
-                    "ERROR",
-                    "缺少边界控制点配置",
-                    project.edge_controls_path,
-                )
-            )
         return issues
 
     @staticmethod
