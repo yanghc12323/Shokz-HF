@@ -13,6 +13,12 @@ $arguments = @(
     "--collect-all", "pyvista",
     "--collect-all", "pyvistaqt",
     "--collect-all", "vtkmodules",
+    "--hidden-import", "scripts.run_full_pipeline",
+    "--hidden-import", "scripts.parameterize_ear_remesh",
+    "--hidden-import", "scripts.visualize_remesh_qc",
+    "--hidden-import", "scripts.build_whole_ear",
+    "--hidden-import", "scripts.align_whole_ear",
+    "--hidden-import", "scripts.build_average_ear",
     "desktop_app\__main__.py"
 )
 if ($OneFile) { $arguments += "--onefile" }

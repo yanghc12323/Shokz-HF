@@ -246,19 +246,28 @@ class ProjectWizard(QWidget):
             field.setText(selected)
 
     def _build_options_page(self) -> QWidget:
-        page, layout = _page("运行参数", "第一版仅允许选择现有配置并调整少量运行参数；配置表请在项目文件夹中维护。")
+        page, layout = _page("运行参数", "请确认以下阈值；悬停输入框可查看含义。一般情况下保留默认值即可。")
         card = QFrame()
         card.setObjectName("contentCard")
         form = QFormLayout(card)
         editors: list[QLineEdit] = []
-        for title, value in (
-            ("最大 Salvage 未映射比例", "0.35"),
-            ("最大 Salvage 退化比例", "0.015"),
-            ("PCA 累积解释方差", "0.75"),
-            ("固定参考耳（可选）", ""),
+        self.option_labels: list[QLabel] = []
+        for title, value, hint in (
+            ("最大 Salvage 未映射比例", "0.35", "允许 Salvage 的最大未映射比例，取值 0–1；默认 0.35。"),
+            ("最大 Salvage 退化比例", "0.015", "允许 Salvage 的最大退化面比例，取值 0–1；默认 0.015。"),
+            ("PCA 累积解释方差", "0.75", "PCA 保留的最小累计解释方差，取值 0–1；默认 0.75。"),
+            ("固定参考耳（可选）", "", "指定一个样本标签作为固定参考耳，例如 T001_L；留空则不启用。"),
         ):
             editor = QLineEdit(value)
-            form.addRow(title, editor)
+            editor.setToolTip(hint)
+            label = QLabel(title)
+            label.setObjectName("fieldLabel")
+            self.option_labels.append(label)
+            hint_label = QLabel(hint)
+            hint_label.setObjectName("fieldHint")
+            hint_label.setWordWrap(True)
+            form.addRow(label, editor)
+            form.addRow("", hint_label)
             editors.append(editor)
         (
             self.max_unmapped_ratio,

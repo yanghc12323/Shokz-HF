@@ -90,6 +90,21 @@ def test_project_fields_use_a_dark_text_color(qtbot):
     assert "QLineEdit { color: #19242d;" in window.styleSheet()
 
 
+def test_run_options_have_visible_explanations(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+
+    editors = (
+        window.wizard.max_unmapped_ratio,
+        window.wizard.max_degenerate_ratio,
+        window.wizard.pca_variance_threshold,
+        window.wizard.reference_sample,
+    )
+
+    assert all(editor.toolTip() for editor in editors)
+    assert all(label.text() for label in window.wizard.option_labels)
+
+
 def test_creating_project_moves_to_import_page(qtbot, tmp_path: Path):
     window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
     qtbot.addWidget(window)
@@ -160,6 +175,15 @@ def test_import_inputs_runs_validation_and_opens_options_when_valid(qtbot, tmp_p
     )
 
     assert "T001_L" in window.run_monitor.event_label.text()
+    assert window.run_monitor.current_sample_label.text() == "T001_L"
+    assert "REMESH" in window.run_monitor.current_stage_label.text()
+    assert "处理中" in window.run_monitor.sample_result_label.text()
+
+    window.run_controller.event_received.emit(
+        {"event": "sample_finished", "stage": "REMESH", "sample_tag": "T001_L", "status": "PASS"}
+    )
+
+    assert "通过" in window.run_monitor.sample_result_label.text()
 
     window.run_controller.event_path.write_text(
         '{"event":"stage_started","stage":"WELD"}\n', encoding="utf-8"

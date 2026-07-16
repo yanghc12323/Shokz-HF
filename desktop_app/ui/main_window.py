@@ -204,6 +204,10 @@ class MainWindow(QMainWindow):
             #validationSummary { color: #8e4b1f; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 5px; padding: 10px; }
             #validationIssues { color: #5a6972; padding: 8px 2px; }
             #runStatus { color: #0d5e6f; font-size: 14px; font-weight: 600; }
+            #fieldLabel { color: #263843; font-weight: 600; }
+            #fieldHint { color: #657782; font-size: 12px; padding: 0 0 6px 0; }
+            #progressCaption { color: #657782; font-size: 12px; }
+            #progressValue { color: #17242f; font-size: 16px; font-weight: 700; }
             QLineEdit { color: #19242d; background: #fbfcfd; border: 1px solid #cfdbe1; border-radius: 4px; padding: 7px; min-width: 320px; }
             QLineEdit:read-only { color: #334955; background: #f4f7f8; }
             QLineEdit::selection { color: #ffffff; background: #0d6674; }
