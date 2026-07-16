@@ -185,6 +185,10 @@ def test_import_inputs_runs_validation_and_opens_options_when_valid(qtbot, tmp_p
 
     assert "通过" in window.run_monitor.sample_result_label.text()
 
+    window.run_controller.event_received.emit({"event": "region_finished", "sample_tag": "T001_L", "region_id": "R01", "raw_status": "WARNING", "repaired_status": "PASS", "salvaged_status": "PASS", "final_status": "PASS", "reason": "", "completed_regions": 1, "total_regions": 3})
+    assert window.run_monitor.total_progress.value() == 1
+    assert window.run_monitor.region_table.item(0, 3).text() == "PASS"
+
     window.run_controller.event_path.write_text(
         '{"event":"stage_started","stage":"WELD"}\n', encoding="utf-8"
     )

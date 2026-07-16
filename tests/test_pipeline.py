@@ -394,9 +394,10 @@ def test_pipeline_config_appends_new_fields_after_legacy_field_order():
         *legacy_field_names,
         "max_salvage_unmapped_ratio",
         "pca_variance_threshold",
-        "event_reporter",
-        "checkpoint",
-    )
+            "event_reporter",
+            "checkpoint",
+            "event_log",
+        )
 
 
 def test_pipeline_config_preserves_legacy_positional_constructor_mapping():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QProgressBar, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from desktop_app.models import AttemptRecord, RunStatus
 from desktop_app.run_controller import RunController
@@ -38,6 +38,12 @@ class RunMonitor(QWidget):
         self.event_label = QLabel("等待运行事件。")
         self.event_label.setObjectName("runEvent")
         self.event_label.setWordWrap(True)
+        self.total_progress = QProgressBar()
+        self.total_progress.setFormat("Region 总进度：%v / %m")
+        self.total_progress.setRange(0, 0)
+        self.region_table = QTableWidget(0, 7)
+        self.region_table.setHorizontalHeaderLabels(["样本", "Region", "原始 QC", "修复后 QC", "Salvaged QC", "最终状态", "原因"])
+        self._region_rows: dict[tuple[str, str], int] = {}
         actions = QHBoxLayout()
         self.pause_button = QPushButton("暂停")
         self.resume_button = QPushButton("继续")
@@ -51,7 +57,9 @@ class RunMonitor(QWidget):
         layout.addWidget(subtitle)
         layout.addWidget(self.status_label)
         layout.addWidget(progress_card)
+        layout.addWidget(self.total_progress)
         layout.addWidget(self.event_label)
+        layout.addWidget(self.region_table, 1)
         layout.addLayout(actions)
         layout.addStretch(1)
         controller.attempt_changed.connect(self.set_attempt)
@@ -84,6 +92,10 @@ class RunMonitor(QWidget):
             self.current_sample_label.setText(sample)
         if stage:
             self.current_stage_label.setText(stage)
+        if kind == "region_started":
+            self._set_region(event, "处理中", "", "", "", "处理中", "")
+        elif kind == "region_finished":
+            self._set_region(event, str(event.get("raw_status", "")), str(event.get("repaired_status", "")), str(event.get("salvaged_status", "")), str(event.get("final_status", "")), str(event.get("reason", "")))
         if kind == "sample_started":
             self.sample_result_label.setText("处理中")
         elif kind == "sample_finished":
@@ -91,6 +103,19 @@ class RunMonitor(QWidget):
             self.sample_result_label.setText("通过" if status in {"PASS", "YES", "COMPLETED"} else "失败" if status in {"ERROR", "FAIL", "FAILED"} else status)
         elif kind == "stage_error":
             self.sample_result_label.setText("阶段失败")
+
+    def _set_region(self, event, raw, repaired, salvaged, final, reason) -> None:
+        sample, region = str(event.get("sample_tag", "")), str(event.get("region_id", ""))
+        key = (sample, region)
+        row = self._region_rows.get(key)
+        if row is None:
+            row = self.region_table.rowCount(); self.region_table.insertRow(row); self._region_rows[key] = row
+        for column, value in enumerate((sample, region, raw, repaired, salvaged, final, reason)):
+            self.region_table.setItem(row, column, QTableWidgetItem(value))
+        total = int(event.get("total_regions", 0) or 0)
+        completed = int(event.get("completed_regions", 0) or 0)
+        if total:
+            self.total_progress.setRange(0, total); self.total_progress.setValue(completed)
 
     def poll_events(self) -> None:
         if self.controller.active_attempt is not None:

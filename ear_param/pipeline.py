@@ -73,6 +73,7 @@ class PipelineConfig:
     pca_variance_threshold: float = 0.75
     event_reporter: Callable[[str, dict[str, object]], None] | None = None
     checkpoint: Callable[[], None] | None = None
+    event_log: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -517,6 +518,7 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             "--salvaged_mesh_out_dir", str(config.salvaged_mesh_dir),
             "--max_salvage_unmapped_ratio", str(config.max_salvage_unmapped_ratio),
             "--max_salvage_degenerate_ratio", str(config.max_salvage_degenerate_ratio),
+            *( ["--event-log", str(config.event_log)] if config.event_log else [] ),
         ], project_root)
         return {
             "remesh": _aggregate_qc_status(config.raw_dir / f"{sample_tag}_remesh_qc.csv"),

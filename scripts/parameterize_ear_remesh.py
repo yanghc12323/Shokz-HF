@@ -22,6 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 import pandas as pd
+from ear_param.events import JsonlEventWriter
 
 from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
 from ear_param.remesh import (
@@ -141,6 +142,7 @@ Example:
         default=0.015,
         help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
     )
+    parser.add_argument("--event-log", help="Optional desktop JSONL event log.")
 
     args = parser.parse_args()
 
@@ -184,6 +186,7 @@ Example:
     salvaged_out_dir.mkdir(parents=True, exist_ok=True)
 
     sample_tag = f"{args.sample_id}_{args.side}"
+    event_writer = JsonlEventWriter(Path(args.event_log)) if args.event_log else None
     all_points: list[pd.DataFrame] = []
     all_repaired_points: list[pd.DataFrame] = []
     all_salvaged_points: list[pd.DataFrame] = []
@@ -204,6 +207,8 @@ Example:
         region = row.to_dict()
         rid = str(region["region_id"])
         rname = str(region["region_name"])
+        if event_writer:
+            event_writer.emit("region_started", sample_tag=sample_tag, region_id=rid, region_name=rname, total_regions=len(regions))
 
         print(f"\n[Remesh] Processing region {rid} ({rname})...")
 
@@ -408,6 +413,8 @@ Example:
                 "mesh_path": str(salvaged_mesh_path) if salvaged_mesh_exported else "",
                 "status": salvaged.status,
             })
+            if event_writer:
+                event_writer.emit("region_finished", sample_tag=sample_tag, region_id=rid, region_name=rname, raw_status=status, repaired_status=repaired.status, salvaged_status=salvaged.status, final_status=salvaged.status, reason=str(salvaged.salvage_rejection_reason or ""), completed_regions=len(qc_records), total_regions=len(regions))
 
             print(
                 f"  -> points={n_samples} (expected {n_expected}), "
@@ -487,6 +494,8 @@ Example:
                 "mesh_path": "",
                 "status": "FAIL",
             })
+            if event_writer:
+                event_writer.emit("region_finished", sample_tag=sample_tag, region_id=rid, region_name=rname, raw_status="FAIL", repaired_status="FAIL", salvaged_status="FAIL", final_status="FAIL", reason=str(exc), completed_regions=len(qc_records), total_regions=len(regions))
 
     if all_points:
         df_all = pd.concat(all_points, ignore_index=True)

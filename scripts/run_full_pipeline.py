@@ -111,6 +111,7 @@ def build_pipeline_config(
         "reporter": print,
     }
     if args.event_log:
+        config_kwargs["event_log"] = Path(args.event_log)
         writer = JsonlEventWriter(Path(args.event_log))
         config_kwargs["event_reporter"] = (
             lambda event, fields: writer.emit(event, **fields)
