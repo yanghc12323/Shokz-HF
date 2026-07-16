@@ -57,6 +57,37 @@ def test_new_project_page_browses_for_workspace_and_explains_fields(qtbot, monke
     assert "工作目录" in window.wizard.project_root.toolTip()
 
 
+def test_project_fields_use_a_dark_text_color(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+
+    assert "QLineEdit { color: #19242d;" in window.styleSheet()
+
+
+def test_creating_project_moves_to_import_page(qtbot, tmp_path: Path):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+
+    window.create_project(str(tmp_path / "workspace"), "项目")
+
+    assert window.workflow.current_page == "import"
+
+
+def test_project_creation_error_is_shown_in_the_page(qtbot, tmp_path: Path):
+    workspace = tmp_path / "nonempty-workspace"
+    workspace.mkdir()
+    (workspace / "existing.txt").write_text("occupied", encoding="utf-8")
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    window.wizard.project_root.setText(str(workspace))
+    window.wizard.project_name.setText("项目")
+
+    window.wizard.create_project_button.click()
+
+    assert not window.wizard.project_error_label.isHidden()
+    assert "目录" in window.wizard.project_error_label.text()
+
+
 def test_options_page_is_blocked_by_validation_error(qtbot, tmp_path: Path):
     window = MainWindow(
         ProjectService(),

@@ -128,10 +128,24 @@ class MainWindow(QMainWindow):
             return
         self.content_stack.setCurrentIndex(index - 1)
 
-    def create_project(self, root: str, name: str) -> ProjectRecord:
-        project = self.project_service.create(Path(root), name.strip() or "未命名项目")
-        self.open_project(project)
+    def create_project(self, root: str, name: str) -> ProjectRecord | None:
+        try:
+            project = self.project_service.create(Path(root), name.strip() or "未命名项目")
+        except (OSError, ValueError) as error:
+            self.wizard.show_project_error(self._project_creation_error(error))
+            return None
+        self.project = project
+        self.expert_mode.set_project(project)
+        self.wizard.clear_project_error()
+        self.workflow.begin_import(project)
+        self.content_stack.setCurrentWidget(self.wizard)
         return project
+
+    @staticmethod
+    def _project_creation_error(error: Exception) -> str:
+        if "not empty" in str(error):
+            return "无法创建项目：所选工作目录不是空文件夹。请选择空文件夹或新建一个文件夹。"
+        return f"无法创建项目：{error}"
 
     def open_project(self, project: ProjectRecord) -> None:
         self.project = project
@@ -192,7 +206,10 @@ class MainWindow(QMainWindow):
             #validationSummary { color: #8e4b1f; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 5px; padding: 10px; }
             #validationIssues { color: #5a6972; padding: 8px 2px; }
             #runStatus { color: #0d5e6f; font-size: 14px; font-weight: 600; }
-            QLineEdit { background: #fbfcfd; border: 1px solid #cfdbe1; border-radius: 4px; padding: 7px; min-width: 320px; }
+            QLineEdit { color: #19242d; background: #fbfcfd; border: 1px solid #cfdbe1; border-radius: 4px; padding: 7px; min-width: 320px; }
+            QLineEdit:read-only { color: #334955; background: #f4f7f8; }
+            QLineEdit::selection { color: #ffffff; background: #0d6674; }
+            #projectError { color: #9b2c2c; background: #fff5f5; border: 1px solid #fecaca; border-radius: 4px; padding: 8px; }
             QPushButton { background: #0d6674; color: white; border: 0; border-radius: 4px; padding: 8px 14px; }
             QPushButton:disabled { background: #a8b6bc; color: #eaf0f2; }
         """)

@@ -81,6 +81,12 @@ class Workflow:
         self.issues = issues
         self.go_to("validation")
 
+    def begin_import(self, project: ProjectRecord) -> None:
+        """Enter the required import step for a newly created project."""
+        self.project = project
+        self.issues = []
+        self.go_to("import")
+
     def can_advance_to(self, page_id: str) -> bool:
         if page_id not in self.page_ids:
             return False
@@ -145,13 +151,20 @@ class ProjectWizard(QWidget):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.addWidget(self.project_root, 1)
         root_layout.addWidget(self.browse_project_root_button)
-        button = QPushButton("创建项目")
-        button.clicked.connect(lambda: self.project_requested.emit(self.project_root.text(), self.project_name.text()))
+        self.create_project_button = QPushButton("创建项目")
+        self.create_project_button.clicked.connect(
+            lambda: self.project_requested.emit(self.project_root.text(), self.project_name.text())
+        )
+        self.project_error_label = QLabel()
+        self.project_error_label.setObjectName("projectError")
+        self.project_error_label.setWordWrap(True)
+        self.project_error_label.hide()
         form.addRow("项目名称", self.project_name)
         form.addRow("说明", QLabel("项目名称用于区分分析批次；可以使用中文，不会影响样本文件名。"))
         form.addRow("工作目录", root_picker)
         form.addRow("说明", QLabel("请选择空文件夹。软件将在其中建立项目、复制输入并保存全部结果。"))
-        form.addRow("", button)
+        form.addRow("", self.project_error_label)
+        form.addRow("", self.create_project_button)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
@@ -160,6 +173,14 @@ class ProjectWizard(QWidget):
         selected = QFileDialog.getExistingDirectory(self, "选择项目工作目录")
         if selected:
             self.project_root.setText(selected)
+
+    def show_project_error(self, message: str) -> None:
+        self.project_error_label.setText(message)
+        self.project_error_label.show()
+
+    def clear_project_error(self) -> None:
+        self.project_error_label.clear()
+        self.project_error_label.hide()
 
     def _build_import_page(self) -> QWidget:
         page, layout = _page("导入数据", "导入后软件只使用项目目录中的副本，原始数据不会被改写。")
