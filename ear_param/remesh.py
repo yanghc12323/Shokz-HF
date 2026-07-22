@@ -149,10 +149,29 @@ class RepairedSamples:
     salvage_attempted: bool = False
     salvage_accepted: bool = False
     salvage_rejection_reason: str = ""
+    degenerate_ratio: float = 0.0
+    degenerate_before: int = 0
+    degenerate_after: int = 0
+    degenerate_salvage_attempted: bool = False
+    degenerate_salvage_accepted: bool = False
+    degenerate_salvage_method: str = ""
+    degenerate_salvage_rejection_reason: str = ""
+    repaired_uv: np.ndarray | None = None
 
     @property
     def repaired_count(self) -> int:
         return int(self.repaired_mask.sum())
+
+
+@dataclass(frozen=True)
+class DegenerateUVRepair:
+    """Auditable local repair result for collapsed source UV faces."""
+
+    uv: np.ndarray
+    degenerate_before: int
+    degenerate_after: int
+    method: str
+    rejection_reason: str = ""
 
 
 def classify_remesh_qc_status(
@@ -179,20 +198,24 @@ def repair_unmapped_samples(
     fail_unmapped_ratio: float = 0.2,
     allow_raw_fail_repair: bool = False,
     max_raw_fail_repair_unmapped_ratio: float = 0.35,
+    max_raw_fail_repair_degenerate_ratio: float = 0.015,
     vertex_ring_steps: int = 2,
     smoothing_iterations: int = 80,
 ) -> RepairedSamples:
     """Repair unmapped samples without changing raw QC semantics.
 
     By default only raw WARNING regions are repaired.  Set
-    allow_raw_fail_repair=True for the conservative salvage layer; degenerate
-    UV faces and heavily unmapped regions remain blocked.
+    allow_raw_fail_repair=True for the conservative salvage layer. A raw FAIL
+    with a small degenerate-UV ratio can be locally reparameterized before the
+    existing unmapped-point repair is applied.
     """
     points = np.asarray(result.sample_points_3d, dtype=float).copy()
     raw_unmapped = np.asarray(result.located_samples.unmapped_mask, dtype=bool)
     n_samples = len(points)
     n_raw_unmapped = int(raw_unmapped.sum())
     n_degenerate = int(result.parameterization.degenerate_face_count)
+    patch_face_count = max(int(len(result.patch.face_ids)), 1)
+    degenerate_ratio = float(n_degenerate / patch_face_count)
     raw_status = classify_remesh_qc_status(
         n_samples,
         n_raw_unmapped,
@@ -204,13 +227,22 @@ def repair_unmapped_samples(
     repaired_mask = np.zeros(n_samples, dtype=bool)
     salvage_attempted = False
     salvage_rejection_reason = ""
+    degenerate_after = n_degenerate
+    degenerate_salvage_attempted = False
+    degenerate_salvage_method = ""
+    degenerate_salvage_rejection_reason = ""
+    repaired_uv: np.ndarray | None = None
+
+    if max_raw_fail_repair_degenerate_ratio < 0.0:
+        raise ValueError("max_raw_fail_repair_degenerate_ratio must be >= 0")
 
     if raw_status == "FAIL":
         raw_unmapped_ratio = n_raw_unmapped / max(n_samples, 1)
         if not allow_raw_fail_repair:
             salvage_rejection_reason = "raw_fail_repair_disabled"
-        elif n_degenerate > 0:
-            salvage_rejection_reason = "degenerate_faces"
+        elif n_degenerate > 0 and degenerate_ratio > float(max_raw_fail_repair_degenerate_ratio):
+            salvage_rejection_reason = "degenerate_ratio"
+            degenerate_salvage_rejection_reason = salvage_rejection_reason
         elif raw_unmapped_ratio > float(max_raw_fail_repair_unmapped_ratio):
             salvage_rejection_reason = "unmapped_ratio"
 
@@ -226,8 +258,87 @@ def repair_unmapped_samples(
                 salvage_attempted=False,
                 salvage_accepted=False,
                 salvage_rejection_reason=salvage_rejection_reason,
+                degenerate_ratio=degenerate_ratio,
+                degenerate_before=n_degenerate,
+                degenerate_after=degenerate_after,
+                degenerate_salvage_attempted=False,
+                degenerate_salvage_accepted=False,
+                degenerate_salvage_method=degenerate_salvage_method,
+                degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
             )
         salvage_attempted = True
+
+        if n_degenerate > 0:
+            degenerate_salvage_attempted = True
+            uv_repair = _repair_degenerate_uv_faces(result)
+            repaired_uv = uv_repair.uv
+            degenerate_after = uv_repair.degenerate_after
+            degenerate_salvage_method = uv_repair.method
+            if degenerate_after > 0:
+                salvage_rejection_reason = uv_repair.rejection_reason or "degenerate_repair_incomplete"
+                degenerate_salvage_rejection_reason = salvage_rejection_reason
+                return RepairedSamples(
+                    points_3d=points,
+                    repaired_mask=repaired_mask,
+                    repair_methods=repair_methods,
+                    raw_status=raw_status,
+                    status="FAIL",
+                    exportable=False,
+                    repaired_unmapped_count=n_raw_unmapped,
+                    salvage_attempted=True,
+                    salvage_accepted=False,
+                    salvage_rejection_reason=salvage_rejection_reason,
+                    degenerate_ratio=degenerate_ratio,
+                    degenerate_before=n_degenerate,
+                    degenerate_after=degenerate_after,
+                    degenerate_salvage_attempted=True,
+                    degenerate_salvage_accepted=False,
+                    degenerate_salvage_method=degenerate_salvage_method,
+                    degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+                    repaired_uv=repaired_uv,
+                )
+
+            remapped = locate_uv_samples_in_faces_indexed(
+                repaired_uv,
+                result.parameterization.local_faces,
+                result.template.uv,
+            )
+            points = map_samples_to_3d(
+                result.parameterization.local_vertices,
+                result.parameterization.local_faces,
+                remapped,
+            )
+            if not _dense_uv_mapping_is_valid(
+                repaired_uv,
+                result.parameterization.local_faces,
+                result.parameterization.local_vertices,
+            ):
+                salvage_rejection_reason = "dense_validation_failed"
+                degenerate_salvage_rejection_reason = salvage_rejection_reason
+                return RepairedSamples(
+                    points_3d=points,
+                    repaired_mask=repaired_mask,
+                    repair_methods=repair_methods,
+                    raw_status=raw_status,
+                    status="FAIL",
+                    exportable=False,
+                    repaired_unmapped_count=int((~np.isfinite(points).all(axis=1)).sum()),
+                    salvage_attempted=True,
+                    salvage_accepted=False,
+                    salvage_rejection_reason=salvage_rejection_reason,
+                    degenerate_ratio=degenerate_ratio,
+                    degenerate_before=n_degenerate,
+                    degenerate_after=degenerate_after,
+                    degenerate_salvage_attempted=True,
+                    degenerate_salvage_accepted=False,
+                    degenerate_salvage_method=degenerate_salvage_method,
+                    degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+                    repaired_uv=repaired_uv,
+                )
+
+            remapped_raw_unmapped = raw_unmapped & np.isfinite(points).all(axis=1)
+            repaired_mask[remapped_raw_unmapped] = True
+            repair_methods[remapped_raw_unmapped] = "uv_reparameterized"
 
     if raw_status == "PASS":
         return RepairedSamples(
@@ -238,6 +349,9 @@ def repair_unmapped_samples(
             status="PASS",
             exportable=True,
             repaired_unmapped_count=0,
+            degenerate_ratio=degenerate_ratio,
+            degenerate_before=n_degenerate,
+            degenerate_after=degenerate_after,
         )
 
     bary = np.asarray(result.template.barycentric, dtype=float)
@@ -251,12 +365,12 @@ def repair_unmapped_samples(
         if len(corner_rows) != 1:
             continue
         sample_id = int(corner_rows[0])
-        if raw_unmapped[sample_id] and lm_id in result.snapped_landmarks:
+        if not np.isfinite(points[sample_id]).all() and lm_id in result.snapped_landmarks:
             points[sample_id] = result.snapped_landmarks[lm_id].snapped_xyz
             repaired_mask[sample_id] = True
             repair_methods[sample_id] = "landmark_vertex"
 
-    remaining = raw_unmapped & ~repaired_mask
+    remaining = ~np.isfinite(points).all(axis=1)
     if remaining.any():
         _smooth_fill_unmapped_samples(
             points,
@@ -273,12 +387,17 @@ def repair_unmapped_samples(
         repair_methods[remaining & ~repaired_mask] = "unrepaired"
 
     repaired_unmapped = ~np.isfinite(points).all(axis=1)
-    status = "PASS" if not repaired_unmapped.any() else classify_remesh_qc_status(
+    status = "PASS" if not repaired_unmapped.any() and degenerate_after == 0 else classify_remesh_qc_status(
         n_samples,
         int(repaired_unmapped.sum()),
-        n_degenerate,
+        degenerate_after,
         fail_unmapped_ratio=fail_unmapped_ratio,
     )
+    if status == "PASS" and not _template_points_are_valid(points, result.template.faces):
+        status = "FAIL"
+        salvage_rejection_reason = "final_template_degenerate"
+        if degenerate_salvage_attempted:
+            degenerate_salvage_rejection_reason = salvage_rejection_reason
     salvage_accepted = bool(salvage_attempted and status == "PASS")
     if salvage_attempted and not salvage_accepted and not salvage_rejection_reason:
         salvage_rejection_reason = "repair_incomplete"
@@ -293,6 +412,14 @@ def repair_unmapped_samples(
         salvage_attempted=salvage_attempted,
         salvage_accepted=salvage_accepted,
         salvage_rejection_reason=salvage_rejection_reason,
+        degenerate_ratio=degenerate_ratio,
+        degenerate_before=n_degenerate,
+        degenerate_after=degenerate_after,
+        degenerate_salvage_attempted=degenerate_salvage_attempted,
+        degenerate_salvage_accepted=bool(degenerate_salvage_attempted and status == "PASS"),
+        degenerate_salvage_method=degenerate_salvage_method,
+        degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+        repaired_uv=repaired_uv,
     )
 
 
@@ -614,6 +741,97 @@ def locate_uv_samples_in_faces(
     )
 
 
+def locate_uv_samples_in_faces_indexed(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    sample_uv: np.ndarray,
+    tol: float = 1e-9,
+) -> LocatedSamples:
+    """Locate UV samples with an axis-aligned face-grid acceleration index."""
+    uv = np.asarray(uv, dtype=float)
+    faces = np.asarray(faces, dtype=int)
+    sample_uv = np.asarray(sample_uv, dtype=float)
+    tri_uvs = uv[faces]
+
+    face_indices = np.full(len(sample_uv), -1, dtype=int)
+    bary = np.full((len(sample_uv), 3), np.nan, dtype=float)
+    unmapped = np.ones(len(sample_uv), dtype=bool)
+    if len(faces) == 0:
+        return LocatedSamples(sample_uv, face_indices, bary, unmapped)
+
+    grid = _build_uv_face_grid(tri_uvs, tol)
+    for sample_id, point in enumerate(sample_uv):
+        candidates = grid.candidates(point)
+        for face_id in candidates:
+            weights = _barycentric_2d(point, tri_uvs[face_id])
+            if weights is None or not np.all(weights >= -tol) or not np.all(weights <= 1.0 + tol):
+                continue
+            clipped = np.clip(weights, 0.0, 1.0)
+            total = clipped.sum()
+            bary[sample_id] = clipped / total if total > 0 else clipped
+            face_indices[sample_id] = face_id
+            unmapped[sample_id] = False
+            break
+
+        if unmapped[sample_id]:
+            # Grid binning is an accelerator, never a change in lookup semantics.
+            for face_id, tri_uv in enumerate(tri_uvs):
+                weights = _barycentric_2d(point, tri_uv)
+                if weights is None or not np.all(weights >= -tol) or not np.all(weights <= 1.0 + tol):
+                    continue
+                clipped = np.clip(weights, 0.0, 1.0)
+                total = clipped.sum()
+                bary[sample_id] = clipped / total if total > 0 else clipped
+                face_indices[sample_id] = face_id
+                unmapped[sample_id] = False
+                break
+
+    return LocatedSamples(sample_uv, face_indices, bary, unmapped)
+
+
+@dataclass(frozen=True)
+class _UVFaceGrid:
+    lower: np.ndarray
+    upper: np.ndarray
+    bin_count: int
+    cells: dict[tuple[int, int], list[int]]
+
+    def candidates(self, point: np.ndarray) -> list[int]:
+        cell = self._cell(point)
+        return self.cells.get(cell, [])
+
+    def _cell(self, point: np.ndarray) -> tuple[int, int]:
+        span = np.maximum(self.upper - self.lower, 1e-12)
+        scaled = (np.asarray(point, dtype=float) - self.lower) / span
+        indices = np.floor(scaled * self.bin_count).astype(int)
+        indices = np.clip(indices, 0, self.bin_count - 1)
+        return int(indices[0]), int(indices[1])
+
+
+def _build_uv_face_grid(tri_uvs: np.ndarray, tol: float) -> _UVFaceGrid:
+    finite_values = tri_uvs[np.isfinite(tri_uvs)]
+    if len(finite_values) == 0:
+        lower = np.zeros(2, dtype=float)
+        upper = np.ones(2, dtype=float)
+    else:
+        lower = np.nanmin(tri_uvs.reshape(-1, 2), axis=0) - tol
+        upper = np.nanmax(tri_uvs.reshape(-1, 2), axis=0) + tol
+    bin_count = max(1, int(np.ceil(np.sqrt(len(tri_uvs)))))
+    grid = _UVFaceGrid(lower, upper, bin_count, {})
+
+    for face_id, tri_uv in enumerate(tri_uvs):
+        if not np.isfinite(tri_uv).all():
+            continue
+        face_lower = tri_uv.min(axis=0) - tol
+        face_upper = tri_uv.max(axis=0) + tol
+        start = grid._cell(face_lower)
+        end = grid._cell(face_upper)
+        for i in range(start[0], end[0] + 1):
+            for j in range(start[1], end[1] + 1):
+                grid.cells.setdefault((i, j), []).append(face_id)
+    return grid
+
+
 def map_samples_to_3d(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -887,16 +1105,234 @@ def _smooth_fill_unmapped_samples(
         points[fixed_mask] = updated[fixed_mask]
 
 
+def _repair_degenerate_uv_faces(result: RegionRemeshResult) -> DegenerateUVRepair:
+    """Relax internal UV vertices until small collapsed faces are resolved."""
+    uv = np.asarray(result.parameterization.uv, dtype=float).copy()
+    faces = np.asarray(result.parameterization.local_faces, dtype=int)
+    area_tolerance = 1e-12
+    initial_areas = _uv_face_signed_areas(uv, faces)
+    degenerate_before = int((np.abs(initial_areas) <= area_tolerance).sum())
+    if degenerate_before == 0:
+        return DegenerateUVRepair(uv, 0, 0, "")
+
+    boundary_ids = _boundary_local_vertex_ids(result)
+    neighbors = _local_vertex_neighbors(faces, len(uv))
+    incident_faces = _vertex_incident_faces(faces, len(uv))
+    dominant_sign = _dominant_uv_orientation(initial_areas, area_tolerance)
+    target_area = _uv_repair_target_area(initial_areas, area_tolerance)
+
+    for _ in range(max(degenerate_before * 3, 1)):
+        current_areas = _uv_face_signed_areas(uv, faces)
+        degenerate_face_ids = np.where(np.abs(current_areas) <= area_tolerance)[0]
+        if len(degenerate_face_ids) == 0:
+            break
+
+        changed = False
+        for face_id in degenerate_face_ids:
+            proposal = _find_uv_relaxation_proposal(
+                uv,
+                faces,
+                int(face_id),
+                boundary_ids,
+                neighbors,
+                incident_faces,
+                current_areas,
+                dominant_sign,
+                target_area,
+                area_tolerance,
+            )
+            if proposal is None:
+                continue
+            vertex_id, value = proposal
+            uv[vertex_id] = value
+            changed = True
+        if not changed:
+            break
+
+    degenerate_after = int((np.abs(_uv_face_signed_areas(uv, faces)) <= area_tolerance).sum())
+    rejection_reason = "" if degenerate_after == 0 else "degenerate_repair_incomplete"
+    return DegenerateUVRepair(
+        uv=uv,
+        degenerate_before=degenerate_before,
+        degenerate_after=degenerate_after,
+        method="local_uv_relaxation",
+        rejection_reason=rejection_reason,
+    )
+
+
+def _boundary_local_vertex_ids(result: RegionRemeshResult) -> set[int]:
+    boundary_global_ids = result.boundary_paths.boundary_vertex_ids
+    return {
+        local_id
+        for local_id, global_id in enumerate(result.parameterization.local_to_global)
+        if int(global_id) in boundary_global_ids
+    }
+
+
+def _vertex_incident_faces(faces: np.ndarray, n_vertices: int) -> list[list[int]]:
+    incident: list[list[int]] = [[] for _ in range(n_vertices)]
+    for face_id, face in enumerate(faces):
+        for vertex_id in face:
+            incident[int(vertex_id)].append(int(face_id))
+    return incident
+
+
+def _dominant_uv_orientation(areas: np.ndarray, area_tolerance: float) -> float:
+    valid = areas[np.abs(areas) > area_tolerance]
+    if len(valid) == 0:
+        return 1.0
+    return 1.0 if float(np.median(valid)) >= 0.0 else -1.0
+
+
+def _uv_repair_target_area(areas: np.ndarray, area_tolerance: float) -> float:
+    valid = np.abs(areas[np.abs(areas) > area_tolerance])
+    if len(valid) == 0:
+        return area_tolerance * 10.0
+    return max(area_tolerance * 10.0, float(np.median(valid)) * 1e-4)
+
+
+def _find_uv_relaxation_proposal(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    face_id: int,
+    boundary_ids: set[int],
+    neighbors: list[set[int]],
+    incident_faces: list[list[int]],
+    current_areas: np.ndarray,
+    dominant_sign: float,
+    target_area: float,
+    area_tolerance: float,
+) -> tuple[int, np.ndarray] | None:
+    face = faces[face_id]
+    movable_ids = [int(vertex_id) for vertex_id in face if int(vertex_id) not in boundary_ids]
+
+    for vertex_id in movable_ids:
+        neighbor_ids = sorted(neighbors[vertex_id])
+        if not neighbor_ids:
+            continue
+        laplacian_value = np.mean(uv[neighbor_ids], axis=0)
+        if _uv_proposal_is_valid(
+            uv,
+            faces,
+            face_id,
+            vertex_id,
+            laplacian_value,
+            incident_faces[vertex_id],
+            current_areas,
+            dominant_sign,
+            area_tolerance,
+        ):
+            return vertex_id, laplacian_value
+
+    candidates: list[tuple[float, int, np.ndarray]] = []
+    for vertex_id in movable_ids:
+        current_value = uv[vertex_id]
+        gradient = _signed_area_gradient(uv, face, vertex_id)
+        gradient_norm_sq = float(np.dot(gradient, gradient))
+        if gradient_norm_sq <= 1e-20:
+            continue
+        desired_area = dominant_sign * target_area
+        delta = ((desired_area - current_areas[face_id]) / gradient_norm_sq) * gradient
+        candidate = current_value + delta
+        if _uv_proposal_is_valid(
+            uv,
+            faces,
+            face_id,
+            vertex_id,
+            candidate,
+            incident_faces[vertex_id],
+            current_areas,
+            dominant_sign,
+            area_tolerance,
+        ):
+            candidates.append((float(np.linalg.norm(delta)), vertex_id, candidate))
+
+    if not candidates:
+        return None
+    _, vertex_id, candidate = min(candidates, key=lambda item: item[0])
+    return vertex_id, candidate
+
+
+def _signed_area_gradient(uv: np.ndarray, face: np.ndarray, vertex_id: int) -> np.ndarray:
+    """Return the exact affine gradient of one face area for one UV vertex."""
+    local_index = int(np.where(face == vertex_id)[0][0])
+    base = uv[vertex_id]
+    gradient = np.empty(2, dtype=float)
+    for axis in range(2):
+        shifted = base.copy()
+        shifted[axis] += 1.0
+        trial = uv[face].copy()
+        trial[local_index] = shifted
+        gradient[axis] = _signed_area2(trial) - _signed_area2(uv[face])
+    return gradient
+
+
+def _uv_proposal_is_valid(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    target_face_id: int,
+    vertex_id: int,
+    candidate: np.ndarray,
+    incident_face_ids: list[int],
+    current_areas: np.ndarray,
+    dominant_sign: float,
+    area_tolerance: float,
+) -> bool:
+    trial_uv = uv.copy()
+    trial_uv[vertex_id] = candidate
+    for face_id in incident_face_ids:
+        previous_area = current_areas[face_id]
+        proposed_area = _signed_area2(trial_uv[faces[face_id]])
+        if face_id != target_face_id and abs(previous_area) <= area_tolerance:
+            continue
+        expected_sign = np.sign(previous_area) if abs(previous_area) > area_tolerance else dominant_sign
+        if abs(proposed_area) <= area_tolerance or np.sign(proposed_area) != expected_sign:
+            return False
+    return True
+
+
+def _dense_uv_mapping_is_valid(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    vertices: np.ndarray,
+    *,
+    validation_resolution: int = 48,
+) -> bool:
+    """Check repaired UV coverage and mapped template-face geometry at r48."""
+    template = make_subdivision_template(validation_resolution)
+    located = locate_uv_samples_in_faces_indexed(uv, faces, template.uv)
+    if located.unmapped_count > 0:
+        return False
+    points = map_samples_to_3d(vertices, faces, located)
+    return _template_points_are_valid(points, template.faces)
+
+
+def _template_points_are_valid(points: np.ndarray, faces: np.ndarray) -> bool:
+    points = np.asarray(points, dtype=float)
+    faces = np.asarray(faces, dtype=int)
+    if not np.isfinite(points).all():
+        return False
+    if len(faces) == 0:
+        return False
+    triangles = points[faces]
+    area2 = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    return bool(np.all(area2 > 1e-12))
+
+
+def _uv_face_signed_areas(uv: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    triangles = np.asarray(uv, dtype=float)[np.asarray(faces, dtype=int)]
+    ab = triangles[:, 1] - triangles[:, 0]
+    ac = triangles[:, 2] - triangles[:, 0]
+    return ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0]
+
+
 def _count_uv_face_quality(uv: np.ndarray, faces: np.ndarray) -> tuple[int, int]:
-    flipped = 0
-    degenerate = 0
-    for face in faces:
-        tri = uv[face]
-        area2 = _signed_area2(tri)
-        if abs(area2) <= 1e-12:
-            degenerate += 1
-        elif area2 < 0.0:
-            flipped += 1
+    areas = _uv_face_signed_areas(uv, faces)
+    degenerate = int((np.abs(areas) <= 1e-12).sum())
+    flipped = int((areas < -1e-12).sum())
     return flipped, degenerate
 
 

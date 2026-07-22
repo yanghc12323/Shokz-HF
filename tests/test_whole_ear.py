@@ -386,6 +386,28 @@ def test_edge_repair_rejects_raw_fail_adjacent_region():
     pd.testing.assert_frame_equal(repair.points, points)
 
 
+def test_edge_repair_allows_accepted_degenerate_salvage_adjacent_region():
+    from ear_param.whole_ear import (
+        assemble_whole_ear,
+        repair_shared_edge_conflicts,
+    )
+
+    template, points, faces, qc, mesh = _warning_edge_fixture(
+        raw_statuses=("FAIL", "WARNING")
+    )
+    salvaged = qc["region_id"] == "R1"
+    qc.loc[salvaged, "degenerate_faces"] = 1
+    qc.loc[salvaged, "degenerate_before"] = 1
+    qc.loc[salvaged, "degenerate_after"] = 0
+    qc.loc[salvaged, "degenerate_salvage_accepted"] = True
+    baseline = assemble_whole_ear(template, points, faces, qc)
+
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+
+    assert repair.qc["applied"].sum() == 1
+    assert not repair.qc.loc[repair.qc["applied"], "rejection_reason"].any()
+
+
 def test_edge_repair_rejects_degenerate_adjacent_region():
     from ear_param.whole_ear import (
         assemble_whole_ear,

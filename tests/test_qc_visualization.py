@@ -177,6 +177,13 @@ def test_classify_repaired_region_qc_reports_repair_counts():
     assert record["salvage_attempted"] is False
     assert record["salvage_accepted"] is False
     assert record["salvage_rejection_reason"] == ""
+    assert record["degenerate_ratio"] == 0.0
+    assert record["degenerate_before"] == 0
+    assert record["degenerate_after"] == 0
+    assert record["degenerate_salvage_attempted"] is False
+    assert record["degenerate_salvage_accepted"] is False
+    assert record["degenerate_salvage_method"] == ""
+    assert record["degenerate_salvage_rejection_reason"] == ""
 
 
 def test_save_region_repaired_qc_figure_writes_png():

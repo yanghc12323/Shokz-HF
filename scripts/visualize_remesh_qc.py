@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
+from ear_param.pipeline import discover_sample_inputs, split_sample_tag
 from ear_param.qc_visualization import (
     classify_region_qc,
     classify_repaired_region_qc,
@@ -31,11 +32,11 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
-  python scripts/visualize_remesh_qc.py --samples T076_L T077_L
-  python scripts/visualize_remesh_qc.py --samples T076_L T077_L --region_ids T001 T008
+  python scripts/visualize_remesh_qc.py --samples MQ_S076L MQ_S077L
+  python scripts/visualize_remesh_qc.py --samples MQ_S076L MQ_S077L --region_ids T001 T008
         """,
     )
-    parser.add_argument("--samples", nargs="+", help="Sample tags, e.g. T076_L T077_L.")
+    parser.add_argument("--samples", nargs="+", help="Sample tags, e.g. MQ_S076L MQ_S077L.")
     parser.add_argument("--region_ids", nargs="+", help="Optional subset of region IDs.")
     parser.add_argument("--data_dir", default="data", help="Input data directory.")
     parser.add_argument("--regions", default="config/region_table.csv", help="Region table CSV path.")
@@ -46,6 +47,12 @@ Example:
         type=float,
         default=0.35,
         help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
+    )
+    parser.add_argument(
+        "--max_salvage_degenerate_ratio",
+        type=float,
+        default=0.015,
+        help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
     )
     args = parser.parse_args()
 
@@ -61,6 +68,12 @@ Example:
     sample_tags = args.samples if args.samples else _discover_sample_tags(data_dir)
     if not sample_tags:
         raise SystemExit("No samples found. Use --samples or add meshes to data/clean_mesh.")
+    source_inputs = {
+        str(row.sample_tag): row
+        for row in discover_sample_inputs(
+            data_dir / "clean_mesh", data_dir / "landmarks"
+        ).itertuples(index=False)
+    }
 
     regions = read_csv_robust(Path(args.regions))
     if args.region_ids:
@@ -74,8 +87,12 @@ Example:
     salvaged_summary_records: list[dict[str, object]] = []
     for sample_tag in sample_tags:
         sample_id, side = _split_sample_tag(sample_tag)
-        mesh_path = data_dir / "clean_mesh" / f"{sample_tag}.ply"
-        landmarks_path = data_dir / "landmarks" / f"{sample_tag}_landmarks.csv"
+        try:
+            source = source_inputs[sample_tag]
+        except KeyError as exc:
+            raise SystemExit(f"Input sample not found: {sample_tag}") from exc
+        mesh_path = Path(source.mesh_path)
+        landmarks_path = Path(source.landmarks_path)
         print(f"[QC] Loading {sample_tag}")
         mesh = load_mesh(mesh_path)
         landmarks = load_landmarks(landmarks_path)
@@ -123,6 +140,7 @@ Example:
                     result,
                     allow_raw_fail_repair=True,
                     max_raw_fail_repair_unmapped_ratio=args.max_salvage_unmapped_ratio,
+                    max_raw_fail_repair_degenerate_ratio=args.max_salvage_degenerate_ratio,
                 )
                 salvaged_record = classify_repaired_region_qc(sample_tag, result, salvaged)
                 salvaged_record.update({
@@ -168,6 +186,13 @@ Example:
                     "salvage_attempted": False,
                     "salvage_accepted": False,
                     "salvage_rejection_reason": "region_error",
+                    "degenerate_ratio": 0.0,
+                    "degenerate_before": 0,
+                    "degenerate_after": 0,
+                    "degenerate_salvage_attempted": False,
+                    "degenerate_salvage_accepted": False,
+                    "degenerate_salvage_method": "",
+                    "degenerate_salvage_rejection_reason": "region_error",
                 })
                 salvaged_record = dict(repaired_record)
                 print(f"  [ERROR] {exc}")
@@ -200,10 +225,7 @@ def _discover_sample_tags(data_dir: Path) -> list[str]:
 
 
 def _split_sample_tag(sample_tag: str) -> tuple[str, str]:
-    if "_" not in sample_tag:
-        raise ValueError(f"sample tag must look like <sample_id>_<side>: {sample_tag}")
-    sample_id, side = sample_tag.rsplit("_", 1)
-    return sample_id, side
+    return split_sample_tag(sample_tag)
 
 
 if __name__ == "__main__":

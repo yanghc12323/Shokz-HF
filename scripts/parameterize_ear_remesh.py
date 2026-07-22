@@ -135,6 +135,12 @@ Example:
         default=0.35,
         help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
     )
+    parser.add_argument(
+        "--max_salvage_degenerate_ratio",
+        type=float,
+        default=0.015,
+        help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
+    )
 
     args = parser.parse_args()
 
@@ -241,6 +247,7 @@ Example:
                 result,
                 allow_raw_fail_repair=True,
                 max_raw_fail_repair_unmapped_ratio=args.max_salvage_unmapped_ratio,
+                max_raw_fail_repair_degenerate_ratio=args.max_salvage_degenerate_ratio,
             )
             repaired_is_unmapped = ~pd.notna(repaired.points_3d).all(axis=1)
             df_repaired_region = df_region.copy()
@@ -271,6 +278,13 @@ Example:
             df_salvaged_region["salvage_attempted"] = salvaged.salvage_attempted
             df_salvaged_region["salvage_accepted"] = salvaged.salvage_accepted
             df_salvaged_region["salvage_rejection_reason"] = salvaged.salvage_rejection_reason
+            df_salvaged_region["degenerate_ratio"] = salvaged.degenerate_ratio
+            df_salvaged_region["degenerate_before"] = salvaged.degenerate_before
+            df_salvaged_region["degenerate_after"] = salvaged.degenerate_after
+            df_salvaged_region["degenerate_salvage_attempted"] = salvaged.degenerate_salvage_attempted
+            df_salvaged_region["degenerate_salvage_accepted"] = salvaged.degenerate_salvage_accepted
+            df_salvaged_region["degenerate_salvage_method"] = salvaged.degenerate_salvage_method
+            df_salvaged_region["degenerate_salvage_rejection_reason"] = salvaged.degenerate_salvage_rejection_reason
             all_salvaged_points.append(df_salvaged_region)
 
             all_faces.append(pd.DataFrame({
@@ -380,6 +394,13 @@ Example:
                 "salvage_attempted": salvaged.salvage_attempted,
                 "salvage_accepted": salvaged.salvage_accepted,
                 "salvage_rejection_reason": salvaged.salvage_rejection_reason,
+                "degenerate_ratio": salvaged.degenerate_ratio,
+                "degenerate_before": salvaged.degenerate_before,
+                "degenerate_after": salvaged.degenerate_after,
+                "degenerate_salvage_attempted": salvaged.degenerate_salvage_attempted,
+                "degenerate_salvage_accepted": salvaged.degenerate_salvage_accepted,
+                "degenerate_salvage_method": salvaged.degenerate_salvage_method,
+                "degenerate_salvage_rejection_reason": salvaged.degenerate_salvage_rejection_reason,
                 "flipped_faces": n_flipped,
                 "degenerate_faces": n_degenerate,
                 "patch_face_count": patch_face_count,
@@ -394,7 +415,8 @@ Example:
                 f"degenerate={n_degenerate}, patch_faces={patch_face_count}, "
                 f"remesh_faces={n_remesh_faces}, raw_status={status}, "
                 f"repaired_status={repaired.status}, repairs={repaired.repaired_count}, "
-                f"salvaged_status={salvaged.status}, salvage_accepted={salvaged.salvage_accepted}"
+                f"salvaged_status={salvaged.status}, salvage_accepted={salvaged.salvage_accepted}, "
+                f"degenerate={salvaged.degenerate_before}->{salvaged.degenerate_after}"
             )
 
         except Exception as exc:
@@ -451,6 +473,13 @@ Example:
                 "salvage_attempted": False,
                 "salvage_accepted": False,
                 "salvage_rejection_reason": "region_error",
+                "degenerate_ratio": 0.0,
+                "degenerate_before": 0,
+                "degenerate_after": 0,
+                "degenerate_salvage_attempted": False,
+                "degenerate_salvage_accepted": False,
+                "degenerate_salvage_method": "",
+                "degenerate_salvage_rejection_reason": "region_error",
                 "flipped_faces": 0,
                 "degenerate_faces": 0,
                 "patch_face_count": 0,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Callable
@@ -12,32 +13,88 @@ import pandas as pd
 from ear_param.canonicalization import canonicalize_sample
 
 
-def discover_samples(mesh_dir: Path, landmarks_dir: Path) -> pd.DataFrame:
-    """Return every mesh/landmark tag and its paired-input readiness state."""
+_MQ_SAMPLE_TAG = re.compile(r"MQ_S(\d{3})([LR])\Z")
+
+
+def split_sample_tag(sample_tag: str) -> tuple[str, str]:
+    """Return the display sample identifier and side for legacy or MQ tags."""
+    mq_match = _MQ_SAMPLE_TAG.fullmatch(sample_tag)
+    if mq_match:
+        return f"MQ_S{mq_match.group(1)}", mq_match.group(2)
+    if "_" in sample_tag:
+        sample_id, side = sample_tag.rsplit("_", 1)
+        if side.upper() in {"L", "R"}:
+            return sample_id, side.upper()
+    raise ValueError(f"sample tag must end in _L/_R or use MQ_S###L/R: {sample_tag}")
+
+
+def landmark_tag_for_sample(sample_tag: str) -> str:
+    """Translate an MQ mesh tag to its landmark tag; preserve legacy tags."""
+    mq_match = _MQ_SAMPLE_TAG.fullmatch(sample_tag)
+    if mq_match:
+        return f"T{mq_match.group(1)}_{mq_match.group(2)}"
+    return sample_tag
+
+
+def discover_sample_inputs(mesh_dir: Path, landmarks_dir: Path) -> pd.DataFrame:
+    """Resolve actual mesh/landmark paths while keeping model names as sample tags."""
     mesh_dir = Path(mesh_dir)
     landmarks_dir = Path(landmarks_dir)
-    mesh_tags = {path.stem for path in mesh_dir.glob("*.ply")} if mesh_dir.exists() else set()
-    landmark_tags = {
-        path.name.removesuffix("_landmarks.csv")
+    meshes = {path.stem: path for path in mesh_dir.glob("*.ply")} if mesh_dir.exists() else {}
+    landmarks = {
+        path.name.removesuffix("_landmarks.csv"): path
         for path in landmarks_dir.glob("*_landmarks.csv")
-    } if landmarks_dir.exists() else set()
+    } if landmarks_dir.exists() else {}
 
-    records: list[dict[str, str]] = []
-    for sample_tag in sorted(mesh_tags | landmark_tags):
-        has_mesh = sample_tag in mesh_tags
-        has_landmarks = sample_tag in landmark_tags
-        if has_mesh and has_landmarks:
-            discovery, reason = "READY", ""
-        elif has_mesh:
+    records: list[dict[str, object]] = []
+    consumed_landmarks: set[str] = set()
+    for sample_tag, mesh_path in sorted(meshes.items()):
+        landmark_tag = landmark_tag_for_sample(sample_tag)
+        landmarks_path = landmarks.get(landmark_tag)
+        if landmarks_path is None:
             discovery, reason = "MISSING_LANDMARKS", "missing_landmarks"
+            landmarks_path = landmarks_dir / f"{landmark_tag}_landmarks.csv"
         else:
-            discovery, reason = "MISSING_MESH", "missing_mesh"
+            discovery, reason = "READY", ""
+            consumed_landmarks.add(landmark_tag)
+        try:
+            sample_id, side = split_sample_tag(sample_tag)
+        except ValueError:
+            sample_id, side = sample_tag, ""
         records.append({
             "sample_tag": sample_tag,
             "discovery": discovery,
             "reason": reason,
+            "sample_id": sample_id,
+            "side": side,
+            "mesh_path": mesh_path,
+            "landmarks_path": landmarks_path,
         })
-    return pd.DataFrame(records, columns=["sample_tag", "discovery", "reason"])
+
+    for landmark_tag, landmarks_path in sorted(landmarks.items()):
+        if landmark_tag in consumed_landmarks:
+            continue
+        try:
+            sample_id, side = split_sample_tag(landmark_tag)
+        except ValueError:
+            sample_id, side = landmark_tag, ""
+        records.append({
+            "sample_tag": landmark_tag,
+            "discovery": "MISSING_MESH",
+            "reason": "missing_mesh",
+            "sample_id": sample_id,
+            "side": side,
+            "mesh_path": mesh_dir / f"{landmark_tag}.ply",
+            "landmarks_path": landmarks_path,
+        })
+
+    columns = ["sample_tag", "discovery", "reason", "sample_id", "side", "mesh_path", "landmarks_path"]
+    return pd.DataFrame(records, columns=columns).sort_values("sample_tag", kind="stable").reset_index(drop=True)
+
+
+def discover_samples(mesh_dir: Path, landmarks_dir: Path) -> pd.DataFrame:
+    """Return every mesh/landmark tag and its paired-input readiness state."""
+    return discover_sample_inputs(mesh_dir, landmarks_dir).loc[:, ["sample_tag", "discovery", "reason"]].copy()
 
 
 @dataclass(frozen=True)
@@ -50,6 +107,9 @@ class PipelineConfig:
     raw_dir: Path = Path("output/parameterized_points_r24/raw")
     repaired_dir: Path = Path("output/parameterized_points_r24/repaired")
     salvaged_dir: Path = Path("output/parameterized_points_r24/salvaged")
+    raw_mesh_dir: Path = Path("output/remesh_r24/raw")
+    repaired_mesh_dir: Path = Path("output/remesh_r24/repaired")
+    salvaged_mesh_dir: Path = Path("output/remesh_r24/salvaged")
     qc_dir: Path = Path("output/qc_visualizations_r24")
     weld_dir: Path = Path("output/whole_ear_r24/weld_repaired")
     aligned_dir: Path = Path("output/whole_ear_r24/aligned_weld_repaired")
@@ -60,11 +120,15 @@ class PipelineConfig:
     canonical_side: str = "L"
     mirror_axis: str = "x"
     disable_side_normalization: bool = True
+    max_salvage_degenerate_ratio: float = 0.015
     sample_tags: tuple[str, ...] = ()
     skip_remesh_qc: bool = False
     skip_pca: bool = False
     reference_sample: str | None = None
     reporter: Callable[[str], None] | None = None
+    max_salvage_unmapped_ratio: float = 0.35
+    pca_variance_threshold: float = 0.75
+    event_reporter: Callable[[str, dict[str, object]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -131,9 +195,11 @@ def run_pipeline(
     stage_functions: StageFunctions,
 ) -> PipelineResult:
     """Run staged sample processing while isolating failures to one sample."""
-    records = discover_samples(config.mesh_dir, config.landmarks_dir).copy()
+    discovered_inputs = discover_sample_inputs(config.mesh_dir, config.landmarks_dir)
+    records = discovered_inputs.loc[:, ["sample_tag", "discovery", "reason"]].copy()
     if config.sample_tags:
         records = records[records["sample_tag"].isin(config.sample_tags)].reset_index(drop=True)
+    inputs_by_tag = {str(row.sample_tag): row for row in discovered_inputs.itertuples(index=False)}
     for column in (
         "remesh", "salvage", "remesh_qc", "weld", "alignment", "pca_included",
         "reference_alignment", "reference_pca_included",
@@ -150,7 +216,12 @@ def run_pipeline(
         if config.disable_side_normalization:
             continue
         try:
-            canonical = canonicalize_sample(sample_tag, config.mesh_dir / f"{sample_tag}.ply", config.landmarks_dir / f"{sample_tag}_landmarks.csv", config.canonical_dir, canonical_side=config.canonical_side, mirror_axis=config.mirror_axis)
+            source = inputs_by_tag[sample_tag]
+            canonical = canonicalize_sample(
+                sample_tag, Path(source.mesh_path), Path(source.landmarks_path),
+                config.canonical_dir, canonical_side=config.canonical_side,
+                mirror_axis=config.mirror_axis,
+            )
             records.at[index, "source_side"] = canonical.source_side
             records.at[index, "canonical_side"] = canonical.canonical_side
             records.at[index, "mirrored"] = canonical.mirrored
@@ -164,12 +235,21 @@ def run_pipeline(
             continue
         sample_tag = str(row["sample_tag"])
         _report(config, f"{sample_tag} REMESH ...")
+        _emit(config, "sample_started", sample_tag=sample_tag, stage="REMESH")
         try:
             outcome = stage_functions.remesh_sample(sample_tag)
         except Exception as exc:
             records.at[index, "remesh"] = "ERROR"
             records.at[index, "reason"] = _append_reason(row["reason"], f"remesh_error:{exc}")
             _report(config, f"{sample_tag} REMESH ... ERROR")
+            _emit(
+                config,
+                "sample_finished",
+                sample_tag=sample_tag,
+                stage="REMESH",
+                status="ERROR",
+                error=str(exc),
+            )
             continue
 
         remesh_status = str(outcome.get("remesh", "ERROR")).upper()
@@ -177,6 +257,14 @@ def run_pipeline(
         records.at[index, "remesh"] = remesh_status
         records.at[index, "salvage"] = salvage_status
         _report(config, f"{sample_tag} REMESH={remesh_status} SALVAGE={salvage_status}")
+        _emit(
+            config,
+            "sample_finished",
+            sample_tag=sample_tag,
+            stage="REMESH",
+            status=salvage_status,
+            remesh_status=remesh_status,
+        )
         if salvage_status != "PASS":
             records.at[index, "reason"] = _append_reason(
                 row["reason"], "salvage_not_pass"
@@ -186,32 +274,68 @@ def run_pipeline(
         else:
             try:
                 _report(config, f"{sample_tag} REMESH_QC ...")
+                _emit(config, "sample_started", sample_tag=sample_tag, stage="REMESH_QC")
                 records.at[index, "remesh_qc"] = str(
                     stage_functions.remesh_qc(sample_tag)
                 ).upper()
                 _report(config, f"{sample_tag} REMESH_QC={records.at[index, 'remesh_qc']}")
+                _emit(
+                    config,
+                    "sample_finished",
+                    sample_tag=sample_tag,
+                    stage="REMESH_QC",
+                    status=str(records.at[index, "remesh_qc"]),
+                )
             except Exception as exc:
                 records.at[index, "remesh_qc"] = "ERROR"
                 records.at[index, "reason"] = _append_reason(
                     records.at[index, "reason"], f"remesh_qc_error:{exc}"
                 )
                 _report(config, f"{sample_tag} REMESH_QC ... ERROR")
+                _emit(
+                    config,
+                    "sample_finished",
+                    sample_tag=sample_tag,
+                    stage="REMESH_QC",
+                    status="ERROR",
+                    error=str(exc),
+                )
 
     weld_tags = records.loc[records["salvage"] == "PASS", "sample_tag"].astype(str).tolist()
     if weld_tags:
         _report(config, f"WELD_REPAIRED ... {len(weld_tags)} samples")
+        _emit(config, "stage_started", stage="WELD", sample_count=len(weld_tags))
         try:
             _apply_weld_statuses(records, stage_functions.weld_batch(weld_tags))
         except Exception as exc:
             _mark_stage_error(records, weld_tags, "weld", "weld_error", exc)
+            _emit(config, "stage_error", stage="WELD", error=str(exc))
+        else:
+            _emit(
+                config,
+                "stage_finished",
+                stage="WELD",
+                status=_aggregate_status_values(records.loc[records["sample_tag"].isin(weld_tags), "weld"]),
+            )
 
     alignment_tags = records.loc[records["weld"] == "PASS", "sample_tag"].astype(str).tolist()
     if alignment_tags:
         _report(config, f"ALIGNMENT ... {len(alignment_tags)} samples")
+        _emit(config, "stage_started", stage="ALIGNMENT", sample_count=len(alignment_tags))
         try:
             _apply_alignment_statuses(records, stage_functions.alignment_batch(alignment_tags))
         except Exception as exc:
             _mark_stage_error(records, alignment_tags, "alignment", "alignment_error", exc)
+            _emit(config, "stage_error", stage="ALIGNMENT", error=str(exc))
+        else:
+            _emit(
+                config,
+                "stage_finished",
+                stage="ALIGNMENT",
+                status=_aggregate_status_values(
+                    records.loc[records["sample_tag"].isin(alignment_tags), "alignment"]
+                ),
+            )
 
     pca_tags = records.loc[records["alignment"] == "PASS", "sample_tag"].astype(str).tolist()
     if len(pca_tags) < 2:
@@ -220,6 +344,7 @@ def run_pipeline(
         pca_status, pca_result = "SKIPPED_BY_OPTION", {"included_tags": []}
     else:
         _report(config, f"GPA PCA ... {len(pca_tags)} aligned samples")
+        _emit(config, "stage_started", stage="GPA_PCA", sample_count=len(pca_tags))
         try:
             pca_result = stage_functions.pca_batch()
             pca_status = str(pca_result.get("status", "ERROR")).upper()
@@ -227,6 +352,9 @@ def run_pipeline(
         except Exception as exc:
             _mark_pca_error(records, pca_tags, "pca_included", "pca_error", exc)
             pca_status, pca_result = "ERROR", {"included_tags": []}
+            _emit(config, "stage_error", stage="GPA_PCA", error=str(exc))
+        else:
+            _emit(config, "stage_finished", stage="GPA_PCA", status=pca_status)
 
     reference_pca_status, reference_pca_result = _run_fixed_reference_branch(
         records,
@@ -265,6 +393,7 @@ def _run_fixed_reference_branch(
         return "SKIPPED_REFERENCE_NOT_WELD_PASS", {"included_tags": []}
 
     _report(config, f"FIXED_REFERENCE_ALIGNMENT ... {len(weld_tags)} samples")
+    _emit(config, "stage_started", stage="FIXED_REFERENCE_ALIGNMENT", sample_count=len(weld_tags))
     try:
         _apply_reference_alignment_statuses(
             records,
@@ -278,7 +407,16 @@ def _run_fixed_reference_branch(
             "reference_alignment_error",
             exc,
         )
+        _emit(config, "stage_error", stage="FIXED_REFERENCE_ALIGNMENT", error=str(exc))
         return "ERROR", {"included_tags": []}
+    _emit(
+        config,
+        "stage_finished",
+        stage="FIXED_REFERENCE_ALIGNMENT",
+        status=_aggregate_status_values(
+            records.loc[records["sample_tag"].isin(weld_tags), "reference_alignment"]
+        ),
+    )
 
     reference_tags = records.loc[
         records["reference_alignment"] == "PASS", "sample_tag"
@@ -289,6 +427,7 @@ def _run_fixed_reference_branch(
         return "SKIPPED_BY_OPTION", {"included_tags": []}
 
     _report(config, f"FIXED_REFERENCE PCA ... {len(reference_tags)} aligned samples")
+    _emit(config, "stage_started", stage="FIXED_REFERENCE_PCA", sample_count=len(reference_tags))
     try:
         result = stage_functions.fixed_reference_pca_batch()
         _apply_pca_inclusion(
@@ -298,7 +437,9 @@ def _run_fixed_reference_branch(
             "reference_pca_included",
             "reference_pca_error",
         )
-        return str(result.get("status", "ERROR")).upper(), result
+        status = str(result.get("status", "ERROR")).upper()
+        _emit(config, "stage_finished", stage="FIXED_REFERENCE_PCA", status=status)
+        return status, result
     except Exception as exc:
         _mark_pca_error(
             records,
@@ -307,6 +448,7 @@ def _run_fixed_reference_branch(
             "reference_pca_error",
             exc,
         )
+        _emit(config, "stage_error", stage="FIXED_REFERENCE_PCA", error=str(exc))
         return "ERROR", {"included_tags": []}
 
 
@@ -424,8 +566,13 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             "--landmarks", str(config.canonical_dir / f"{sample_tag}_landmarks.csv"),
             "--regions", str(config.regions),
             "--out_dir", str(config.raw_dir),
+            "--mesh_out_dir", str(config.raw_mesh_dir),
             "--repaired_out_dir", str(config.repaired_dir),
+            "--repaired_mesh_out_dir", str(config.repaired_mesh_dir),
             "--salvaged_out_dir", str(config.salvaged_dir),
+            "--salvaged_mesh_out_dir", str(config.salvaged_mesh_dir),
+            "--max_salvage_unmapped_ratio", str(config.max_salvage_unmapped_ratio),
+            "--max_salvage_degenerate_ratio", str(config.max_salvage_degenerate_ratio),
         ], project_root)
         return {
             "remesh": _aggregate_qc_status(config.raw_dir / f"{sample_tag}_remesh_qc.csv"),
@@ -439,6 +586,8 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             "--data_dir", str(config.mesh_dir.parent),
             "--regions", str(config.regions),
             "--out_dir", str(config.qc_dir),
+            "--max_salvage_unmapped_ratio", str(config.max_salvage_unmapped_ratio),
+            "--max_salvage_degenerate_ratio", str(config.max_salvage_degenerate_ratio),
         ], project_root)
         summary_path = config.qc_dir / "salvaged" / "qc_visualization_summary.csv"
         summary = pd.read_csv(summary_path)
@@ -469,6 +618,7 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             sys.executable, str(project_root / "scripts" / "build_average_ear.py"),
             "--aligned_dir", str(config.aligned_dir), "--weld_dir", str(config.weld_dir),
             "--out_dir", str(config.pca_dir),
+            "--variance_threshold", str(config.pca_variance_threshold),
         ], project_root)
         manifest = pd.read_csv(config.pca_dir / "pca_input_manifest.csv")
         summary = pd.read_csv(config.pca_dir / "pca_summary.csv").iloc[0]
@@ -503,6 +653,7 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             "--aligned_dir", str(config.reference_aligned_dir),
             "--weld_dir", str(config.weld_dir),
             "--out_dir", str(config.reference_pca_dir),
+            "--variance_threshold", str(config.pca_variance_threshold),
         ], project_root)
         manifest = pd.read_csv(config.reference_pca_dir / "pca_input_manifest.csv")
         summary = pd.read_csv(config.reference_pca_dir / "pca_summary.csv").iloc[0]
@@ -548,11 +699,14 @@ def _aggregate_status_values(values: pd.Series) -> str:
 
 
 def _split_sample_tag(sample_tag: str) -> tuple[str, str]:
-    if "_" not in sample_tag:
-        raise ValueError(f"sample tag must look like <sample_id>_<side>: {sample_tag}")
-    return tuple(sample_tag.rsplit("_", 1))  # type: ignore[return-value]
+    return split_sample_tag(sample_tag)
 
 
 def _report(config: PipelineConfig, message: str) -> None:
     if config.reporter is not None:
         config.reporter(f"[Pipeline] {message}")
+
+
+def _emit(config: PipelineConfig, event: str, **fields: object) -> None:
+    if config.event_reporter is not None:
+        config.event_reporter(event, fields)
