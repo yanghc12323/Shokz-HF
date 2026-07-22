@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--reference-sample",
-        help="Fixed-reference ear tag; the current designated reference is MQ_S068L.",
+        help="Fixed-reference ear tag; the current designated reference is MQ_S076L.",
     )
     parser.add_argument("--run_dir", help="Directory for this run's summary artifacts.")
     parser.add_argument(
