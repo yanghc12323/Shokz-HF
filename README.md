@@ -524,3 +524,20 @@ docs/W3 PCA 与平均耳技术路线.md
 4. `docs/W3 PCA 与平均耳技术路线.md`：记录 W3 输入契约、命令、输出和实际结果。
 
 不要让 README 停留在旧样本、旧 region table 或旧结论上。
+# CLI 全流程运行（新版 MQ 输入）
+
+在项目根目录运行。`--parallel-workers 0` 为自动并行（最多 4），也可明确指定
+`1`、`2` 或 `4`；固定参考耳使用 `MQ_S068L`。
+
+```powershell
+python scripts\run_full_pipeline.py `
+  --mesh_dir data\clean_mesh `
+  --landmarks_dir data\landmarks `
+  --regions config\region_table.csv `
+  --parallel-workers 4 `
+  --reference-sample MQ_S068L `
+  --output-root output\runs\mq_full_20260722
+```
+
+`--output-root` 必须是不存在或空目录。运行完成后，该目录包含 manifest、日志、QC、
+整耳、配准和 PCA 结果。
