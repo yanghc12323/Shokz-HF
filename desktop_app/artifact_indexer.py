@@ -25,6 +25,7 @@ class ArtifactIndex:
     weld_summary: pd.DataFrame
     alignment_summary: pd.DataFrame
     pca_input_manifest: pd.DataFrame
+    pca_scores: pd.DataFrame
     evidence: tuple[ArtifactRef, ...]
 
 
@@ -34,6 +35,7 @@ class ArtifactIndexer:
     _ROOT_EVIDENCE = (
         ("批处理汇总", "pipeline_batch_summary.csv"),
         ("运行汇总", "pipeline_run_summary.csv"),
+        ("耗时汇总", "pipeline_timing_summary.csv"),
         ("运行日志", "pipeline_run.log"),
     )
 
@@ -66,12 +68,22 @@ class ArtifactIndexer:
         weld_summary, weld_refs = self._sample_qc_tables(
             output_dirs.get("weld_dir"), "*_weld_qc_summary.csv", "Weld QC"
         )
-        alignment_path = self._declared_file(output_dirs.get("aligned_dir"), "alignment_qc_summary.csv")
+        selected_alignment_dir = self._selected_output_dir(output_dirs, manifest, "aligned")
+        selected_pca_dir = self._selected_output_dir(output_dirs, manifest, "pca")
+        output_dirs["selected_alignment_dir"] = selected_alignment_dir
+        output_dirs["selected_pca_dir"] = selected_pca_dir
+        alignment_path = self._declared_file(selected_alignment_dir, "alignment_qc_summary.csv")
         alignment_summary = self._read_csv(alignment_path)
-        pca_path = self._declared_file(output_dirs.get("pca_dir"), "pca_input_manifest.csv")
+        pca_path = self._declared_file(selected_pca_dir, "pca_input_manifest.csv")
         pca_input_manifest = self._read_csv(pca_path)
+        pca_scores_path = self._declared_file(selected_pca_dir, "scores.csv")
+        pca_scores = self._read_csv(pca_scores_path)
         evidence.extend(weld_refs)
-        for label, path in (("对齐 QC", alignment_path), ("PCA 输入清单", pca_path)):
+        for label, path in (
+            ("对齐 QC", alignment_path),
+            ("PCA 输入清单", pca_path),
+            ("PCA Score", pca_scores_path),
+        ):
             if path is not None and path.is_file():
                 evidence.append(ArtifactRef(label, path))
 
@@ -84,6 +96,7 @@ class ArtifactIndexer:
             weld_summary=weld_summary,
             alignment_summary=alignment_summary,
             pca_input_manifest=pca_input_manifest,
+            pca_scores=pca_scores,
             evidence=tuple(evidence),
         )
 
@@ -138,3 +151,14 @@ class ArtifactIndexer:
                 raise ArtifactIntegrityError(f"输出路径越出当前运行目录: {claimed_path}") from exc
             result[name] = resolved
         return result
+
+    @staticmethod
+    def _selected_output_dir(
+        output_dirs: dict[str, Path],
+        manifest: dict[str, object],
+        stage: str,
+    ) -> Path | None:
+        parameters = manifest.get("parameters")
+        mode = parameters.get("alignment_mode") if isinstance(parameters, dict) else "gpa"
+        prefix = "reference_" if mode == "fixed-reference" else ""
+        return output_dirs.get(f"{prefix}{stage}_dir")

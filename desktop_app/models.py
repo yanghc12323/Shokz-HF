@@ -103,6 +103,9 @@ class RunOptions:
     max_salvage_degenerate_ratio: float = 0.015
     pca_variance_threshold: float = 0.75
     reference_sample: str | None = None
+    qc_figure_mode: str = "all"
+    alignment_mode: str = "gpa"
+    parallel_workers: int = 0
 
 
 @dataclass(frozen=True)

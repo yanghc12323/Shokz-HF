@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from threading import Event, Lock
+import time
 from types import SimpleNamespace
 
 import pandas as pd
@@ -92,6 +94,7 @@ def test_full_pipeline_only_prepares_an_explicit_output_root(
         pca_result={},
         reference_pca_status="SKIPPED",
         reference_pca_result={},
+        stage_timings=[],
     )
 
     monkeypatch.setattr(
@@ -261,6 +264,79 @@ def test_discover_samples_records_ready_and_missing_pairs(tmp_path: Path):
     assert discovered.loc["T003_L", "reason"] == "missing_mesh"
 
 
+def test_discover_samples_pairs_mq_mesh_with_t_landmarks(tmp_path: Path):
+    from ear_param.pipeline import discover_samples
+
+    mesh_dir = tmp_path / "clean_mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    mesh_dir.mkdir()
+    landmarks_dir.mkdir()
+    (mesh_dir / "MQ_S001L.ply").write_text("mesh placeholder")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text("landmark_id,x,y,z\n")
+
+    discovered = discover_samples(mesh_dir, landmarks_dir)
+
+    assert discovered.to_dict("records") == [
+        {"sample_tag": "MQ_S001L", "discovery": "READY", "reason": ""}
+    ]
+
+
+def test_discover_samples_keeps_unrecognized_mesh_for_validation(tmp_path: Path):
+    from ear_param.pipeline import discover_samples
+
+    mesh_dir = tmp_path / "clean_mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    mesh_dir.mkdir()
+    landmarks_dir.mkdir()
+    (mesh_dir / "unrecognized.ply").write_text("mesh placeholder")
+
+    discovered = discover_samples(mesh_dir, landmarks_dir)
+
+    assert discovered.to_dict("records") == [{
+        "sample_tag": "unrecognized",
+        "discovery": "MISSING_LANDMARKS",
+        "reason": "missing_landmarks",
+    }]
+
+
+def test_pipeline_uses_t_landmark_path_for_mq_canonicalization(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir = tmp_path / "clean_mesh"
+    landmarks_dir = tmp_path / "landmarks"
+    mesh_dir.mkdir()
+    landmarks_dir.mkdir()
+    mesh_path = mesh_dir / "MQ_S001L.ply"
+    trimesh.Trimesh(
+        vertices=[[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces=[[0, 1, 2]], process=False,
+    ).export(mesh_path)
+    pd.DataFrame({"landmark_id": ["L7"], "x": [0.0], "y": [0.0], "z": [0.0]}).to_csv(
+        landmarks_dir / "T001_L_landmarks.csv", index=False
+    )
+    canonical_dir = tmp_path / "canonical"
+    called: list[str] = []
+    stages = StageFunctions(
+        remesh_sample=lambda tag: called.append(tag) or {"remesh": "PASS", "salvage": "PASS"},
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame({"sample_tag": tags, "status": ["PASS"], "pca_ready": [True]}),
+        alignment_batch=lambda tags: pd.DataFrame({"sample_tag": tags, "status": ["PASS"]}),
+        pca_batch=lambda: {"status": "PASS", "included_tags": ["MQ_S001L"]},
+    )
+
+    run_pipeline(
+        PipelineConfig(
+            mesh_dir=mesh_dir,
+            landmarks_dir=landmarks_dir,
+            canonical_dir=canonical_dir,
+            disable_side_normalization=False,
+        ),
+        stage_functions=stages,
+    )
+
+    assert called == ["MQ_S001L"]
+    assert (canonical_dir / "MQ_S001L_landmarks.csv").is_file()
+
+
 def test_pipeline_continues_after_one_sample_remesh_error(tmp_path: Path):
     from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
 
@@ -374,6 +450,16 @@ def test_pipeline_config_defaults_match_child_salvage_and_pca_defaults(tmp_path:
     assert config.pca_variance_threshold == 0.75
     assert cli_config.max_salvage_unmapped_ratio == 0.35
     assert cli_config.pca_variance_threshold == 0.75
+    assert cli_config.parallel_workers == 1
+
+
+def test_pipeline_resolves_automatic_workers_to_a_bounded_count(monkeypatch):
+    import ear_param.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.os, "cpu_count", lambda: 12)
+
+    assert pipeline._effective_parallel_workers(0) == 4
+    assert pipeline._effective_parallel_workers(2) == 2
 
 
 def test_pipeline_config_appends_new_fields_after_legacy_field_order():
@@ -397,6 +483,9 @@ def test_pipeline_config_appends_new_fields_after_legacy_field_order():
             "event_reporter",
             "checkpoint",
             "event_log",
+            "qc_figure_mode",
+            "alignment_mode",
+            "parallel_workers",
         )
 
 
@@ -521,6 +610,7 @@ def test_subprocess_remesh_qc_receives_effective_salvage_limits(monkeypatch):
         landmarks_dir=Path("data/landmarks"),
         max_salvage_unmapped_ratio=0.28,
         max_salvage_degenerate_ratio=0.012,
+        qc_figure_mode="repaired-fail",
     )
     commands: list[list[str]] = []
     monkeypatch.setattr(
@@ -542,6 +632,50 @@ def test_subprocess_remesh_qc_receives_effective_salvage_limits(monkeypatch):
     assert "--max_salvage_unmapped_ratio" in command
     assert command[command.index("--max_salvage_unmapped_ratio") + 1] == "0.28"
     assert command[command.index("--max_salvage_degenerate_ratio") + 1] == "0.012"
+    assert command[command.index("--figure-mode") + 1] == "repaired-fail"
+
+
+def test_parallel_subprocess_qc_uses_a_private_summary_dir(monkeypatch, tmp_path: Path):
+    import ear_param.pipeline as pipeline
+
+    config = pipeline.PipelineConfig(
+        mesh_dir=tmp_path / "inputs" / "clean_mesh",
+        landmarks_dir=tmp_path / "inputs" / "landmarks",
+        qc_dir=tmp_path / "qc",
+        parallel_workers=2,
+    )
+    commands: list[list[str]] = []
+    monkeypatch.setattr(pipeline, "_run_command", lambda command, cwd: commands.append(command))
+    monkeypatch.setattr(
+        pipeline.pd,
+        "read_csv",
+        lambda path: pd.DataFrame({"sample_tag": ["T001_L"], "status": ["PASS"]}),
+    )
+
+    pipeline.build_subprocess_stages(config).remesh_qc("T001_L")
+
+    command = commands[0]
+    assert command[command.index("--summary-dir") + 1] == str(
+        config.qc_dir / "_sample_summaries" / "T001_L"
+    )
+
+
+def test_merge_private_qc_summaries_restores_sorted_standard_summaries(tmp_path: Path):
+    from ear_param.pipeline import _merge_private_qc_summaries
+
+    qc_dir = tmp_path / "qc"
+    for sample_tag in ("T002_L", "T001_L"):
+        for layer in ("raw", "repaired", "salvaged"):
+            path = qc_dir / "_sample_summaries" / sample_tag / layer
+            path.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame({"sample_tag": [sample_tag], "region_id": ["R02"], "status": ["PASS"]}).to_csv(
+                path / "qc_visualization_summary.csv", index=False
+            )
+
+    _merge_private_qc_summaries(qc_dir, ["T002_L", "T001_L"])
+
+    merged = pd.read_csv(qc_dir / "salvaged" / "qc_visualization_summary.csv")
+    assert merged["sample_tag"].tolist() == ["T001_L", "T002_L"]
 
 
 def test_subprocess_pca_branches_receive_effective_variance_threshold(
@@ -759,3 +893,297 @@ def test_pipeline_runs_isolated_fixed_reference_pca_branch(tmp_path: Path):
     assert records.loc["T001_L", "reference_pca_included"] == "YES"
     assert result.pca_status == "PASS"
     assert result.reference_pca_status == "PASS"
+
+
+def test_fixed_reference_mode_uses_reference_branch_as_primary_result(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    for sample_tag in ("T001_L", "T002_L"):
+        (mesh_dir / f"{sample_tag}.ply").write_text("mesh placeholder")
+        (landmarks_dir / f"{sample_tag}_landmarks.csv").write_text("landmark_id,x,y,z\n")
+
+    calls: list[str] = []
+    stages = StageFunctions(
+        remesh_sample=lambda tag: {"remesh": "PASS", "salvage": "PASS"},
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame({"sample_tag": tags, "status": "PASS", "pca_ready": True}),
+        alignment_batch=lambda tags: calls.append("gpa-alignment") or pd.DataFrame(),
+        pca_batch=lambda: calls.append("gpa-pca") or {"status": "PASS", "included_tags": []},
+        fixed_reference_alignment_batch=lambda tags, reference: (
+            calls.append("reference-alignment")
+            or pd.DataFrame({"sample_tag": tags, "status": "PASS"})
+        ),
+        fixed_reference_pca_batch=lambda: (
+            calls.append("reference-pca")
+            or {"status": "PASS", "included_tags": ["T001_L", "T002_L"]}
+        ),
+    )
+
+    result = run_pipeline(
+        PipelineConfig(
+            mesh_dir=mesh_dir,
+            landmarks_dir=landmarks_dir,
+            reference_sample="T001_L",
+            alignment_mode="fixed-reference",
+        ),
+        stage_functions=stages,
+    )
+
+    assert calls == ["reference-alignment", "reference-pca"]
+    assert result.pca_status == "PASS"
+    assert result.pca_result == result.reference_pca_result
+    assert set(result.records["alignment"]) == {"PASS"}
+    assert set(result.records["pca_included"]) == {"YES"}
+
+
+def test_fixed_reference_mode_requires_reference_sample():
+    from scripts.run_full_pipeline import build_parser, build_pipeline_config
+
+    args = build_parser().parse_args(["--alignment-mode", "fixed-reference"])
+
+    with pytest.raises(ValueError, match="reference-sample"):
+        build_pipeline_config(args)
+
+
+def test_pipeline_subprocesses_are_hidden_on_windows(monkeypatch, tmp_path: Path):
+    import ear_param.pipeline as pipeline
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        pipeline.subprocess,
+        "run",
+        lambda command, **kwargs: captured.update(command=command, **kwargs),
+    )
+    monkeypatch.setattr(pipeline.sys, "platform", "win32")
+
+    pipeline._run_command(["python", "stage.py"], tmp_path)
+
+    assert captured["creationflags"] == pipeline.subprocess.CREATE_NO_WINDOW
+
+
+def test_pipeline_runs_independent_remesh_samples_in_parallel_and_keeps_row_order(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    for sample_tag in ("T001_L", "T002_L"):
+        (mesh_dir / f"{sample_tag}.ply").write_text("mesh placeholder")
+        (landmarks_dir / f"{sample_tag}_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    second_started = Event()
+
+    def remesh_sample(sample_tag: str) -> dict[str, str]:
+        if sample_tag == "T001_L":
+            assert second_started.wait(0.5), "second sample was not started in parallel"
+        else:
+            second_started.set()
+        return {"remesh": "PASS", "salvage": "PASS"}
+
+    stages = StageFunctions(
+        remesh_sample=remesh_sample,
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+    )
+
+    result = run_pipeline(
+        PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir, parallel_workers=2),
+        stage_functions=stages,
+    )
+
+    assert result.records["sample_tag"].tolist() == ["T001_L", "T002_L"]
+    assert result.records["remesh"].tolist() == ["PASS", "PASS"]
+
+
+def test_parallel_remesh_relays_sample_region_events_from_private_logs(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    (mesh_dir / "T001_L.ply").write_text("mesh placeholder")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    events: list[tuple[str, dict[str, object]]] = []
+    stages = StageFunctions(
+        remesh_sample=lambda tag: {"remesh": "PASS", "salvage": "PASS"},
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+        remesh_events=lambda tag: [{"event": "region_finished", "sample_tag": tag, "region_id": "R01"}],
+    )
+
+    run_pipeline(
+        PipelineConfig(
+            mesh_dir=mesh_dir,
+            landmarks_dir=landmarks_dir,
+            parallel_workers=2,
+            event_reporter=lambda event, fields: events.append((event, fields)),
+        ),
+        stage_functions=stages,
+    )
+
+    assert ("region_finished", {"sample_tag": "T001_L", "region_id": "R01"}) in events
+
+
+def test_incremental_private_event_reader_keeps_partial_line_for_next_poll(tmp_path: Path):
+    from ear_param.pipeline import _read_jsonl_events_incrementally
+
+    path = tmp_path / "T001_L.jsonl"
+    first = b'{"event":"region_started","region_id":"R01"}\n'
+    second = b'{"event":"region_finished","region_id":"R01"}'
+    path.write_bytes(first + second[:20])
+
+    events, offset = _read_jsonl_events_incrementally(path, 0)
+
+    assert events == [{"event": "region_started", "region_id": "R01"}]
+    assert offset == len(first)
+    with path.open("ab") as stream:
+        stream.write(second[20:] + b"\n")
+    events, offset = _read_jsonl_events_incrementally(path, offset)
+    assert events == [{"event": "region_finished", "region_id": "R01"}]
+    assert offset == len(first) + len(second) + 1
+
+
+def test_parallel_remesh_relays_region_event_before_sample_finishes(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    (mesh_dir / "T001_L.ply").write_text("mesh placeholder")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    event_ready = Event()
+    event_forwarded = Event()
+    sent = False
+    received: list[tuple[str, dict[str, object]]] = []
+
+    def remesh_sample(tag: str) -> dict[str, str]:
+        event_ready.set()
+        assert event_forwarded.wait(0.5), "region event was not forwarded during processing"
+        return {"remesh": "PASS", "salvage": "PASS"}
+
+    def poll_events(tag: str) -> list[dict[str, object]]:
+        nonlocal sent
+        if event_ready.is_set() and not sent:
+            sent = True
+            return [{"event": "region_finished", "sample_tag": tag, "region_id": "R01"}]
+        return []
+
+    def report(event: str, fields: dict[str, object]) -> None:
+        received.append((event, fields))
+        if event == "region_finished":
+            event_forwarded.set()
+
+    stages = StageFunctions(
+        remesh_sample=remesh_sample,
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+        poll_remesh_events=poll_events,
+    )
+
+    run_pipeline(
+        PipelineConfig(
+            mesh_dir=mesh_dir,
+            landmarks_dir=landmarks_dir,
+            parallel_workers=2,
+            event_reporter=report,
+        ),
+        stage_functions=stages,
+    )
+
+    assert ("region_finished", {"sample_tag": "T001_L", "region_id": "R01"}) in received
+
+
+def test_parallel_remesh_runs_qc_calls_concurrently_when_outputs_are_isolated(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    for sample_tag in ("T001_L", "T002_L"):
+        (mesh_dir / f"{sample_tag}.ply").write_text("mesh placeholder")
+        (landmarks_dir / f"{sample_tag}_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    lock = Lock()
+    active_qc = 0
+    max_active_qc = 0
+
+    def remesh_sample(tag: str) -> dict[str, str]:
+        return {"remesh": "PASS", "salvage": "PASS"}
+
+    def remesh_qc(tag: str) -> str:
+        nonlocal active_qc, max_active_qc
+        with lock:
+            active_qc += 1
+            max_active_qc = max(max_active_qc, active_qc)
+        time.sleep(0.05)
+        with lock:
+            active_qc -= 1
+        return "PASS"
+
+    stages = StageFunctions(
+        remesh_sample=remesh_sample, remesh_qc=remesh_qc,
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+    )
+
+    run_pipeline(
+        PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir, parallel_workers=2),
+        stage_functions=stages,
+    )
+
+    assert max_active_qc == 2
+
+
+def test_pipeline_writes_sample_timing_summary(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline, write_pipeline_outputs
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    (mesh_dir / "T001_L.ply").write_text("mesh placeholder")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    stages = StageFunctions(
+        remesh_sample=lambda tag: {"remesh": "PASS", "salvage": "PASS"},
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status", "pca_ready"]),
+        alignment_batch=lambda tags: pd.DataFrame(columns=["sample_tag", "status"]),
+        pca_batch=lambda: {"status": "PASS", "included_tags": []},
+    )
+
+    result = run_pipeline(
+        PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir, parallel_workers=1),
+        stage_functions=stages,
+    )
+    write_pipeline_outputs(result, tmp_path / "run")
+
+    timings = pd.read_csv(tmp_path / "run" / "pipeline_timing_summary.csv")
+    assert timings[["stage", "sample_tag"]].values.tolist()[:2] == [
+        ["REMESH", "T001_L"],
+        ["REMESH_QC", "T001_L"],
+    ]
+
+
+def test_pipeline_timing_summary_includes_global_stage_elapsed_time(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, StageFunctions, run_pipeline, write_pipeline_outputs
+
+    mesh_dir, landmarks_dir = tmp_path / "clean_mesh", tmp_path / "landmarks"
+    mesh_dir.mkdir(); landmarks_dir.mkdir()
+    for sample_tag in ("T001_L", "T002_L"):
+        (mesh_dir / f"{sample_tag}.ply").write_text("mesh placeholder")
+        (landmarks_dir / f"{sample_tag}_landmarks.csv").write_text("landmark_id,x,y,z\n")
+    stages = StageFunctions(
+        remesh_sample=lambda tag: {"remesh": "PASS", "salvage": "PASS"},
+        remesh_qc=lambda tag: "PASS",
+        weld_batch=lambda tags: pd.DataFrame({"sample_tag": tags, "status": ["PASS", "PASS"], "pca_ready": [True, True]}),
+        alignment_batch=lambda tags: pd.DataFrame({"sample_tag": tags, "status": ["PASS", "PASS"]}),
+        pca_batch=lambda: {"status": "PASS", "included_tags": ["T001_L", "T002_L"]},
+    )
+
+    result = run_pipeline(PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir), stage_functions=stages)
+    write_pipeline_outputs(result, tmp_path / "run")
+
+    timings = pd.read_csv(tmp_path / "run" / "pipeline_timing_summary.csv")
+    assert {"WELD", "ALIGNMENT", "GPA_PCA"}.issubset(set(timings["stage"]))
+    assert pd.isna(timings.loc[timings["stage"] == "WELD", "sample_tag"].item())

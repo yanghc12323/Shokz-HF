@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -71,12 +72,14 @@ def canonicalize_sample(
 
 
 def _side_from_tag(sample_tag: str) -> str:
-    if "_" not in sample_tag:
-        raise ValueError(f"sample tag must end in _L or _R: {sample_tag}")
-    side = sample_tag.rsplit("_", 1)[1].upper()
-    if side not in {"L", "R"}:
-        raise ValueError(f"sample tag must end in _L or _R: {sample_tag}")
-    return side
+    mq_match = re.fullmatch(r"MQ_S\d{3}([LR])", sample_tag)
+    if mq_match:
+        return mq_match.group(1)
+    if "_" in sample_tag:
+        side = sample_tag.rsplit("_", 1)[1].upper()
+        if side in {"L", "R"}:
+            return side
+    raise ValueError(f"sample tag must end in _L/_R or use MQ_S###L/R: {sample_tag}")
 
 
 def _axis_index(axis: str) -> int:

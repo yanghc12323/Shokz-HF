@@ -37,6 +37,6 @@ def create_application(argv: list[str] | None = None) -> QApplication:
     if existing is not None:
         _install_chinese_font(existing)
         return existing
-    application = QApplication(sys.argv if argv is None else ["耳廓工程分析", *argv])
+    application = QApplication(sys.argv if argv is None else ["Shokz-耳部降采样分析系统", *argv])
     _install_chinese_font(application)
     return application

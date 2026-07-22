@@ -5,6 +5,7 @@ import inspect
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from desktop_app.app import create_application
+from desktop_app.models import RunOptions
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
 from desktop_app.ui.main_window import MainWindow
@@ -103,6 +104,71 @@ def test_run_options_have_visible_explanations(qtbot):
 
     assert all(editor.toolTip() for editor in editors)
     assert all(label.text() for label in window.wizard.option_labels)
+    assert window.wizard.qc_figure_mode.currentData() == "repaired-fail"
+    assert window.wizard.qc_figure_mode.count() == 3
+    assert window.wizard.qc_figure_mode.objectName() == "qcFigureMode"
+    assert "#qcFigureMode { color: #37474f; background: #eef1f3;" in window.styleSheet()
+    assert window.wizard.parallel_workers.currentData() == 0
+    assert window.wizard.parallel_workers.count() == 4
+
+
+def test_fixed_reference_mode_requires_and_emits_a_reference_sample(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    requested = []
+    window.wizard.start_requested.disconnect(window.start_analysis)
+    window.wizard.start_requested.connect(requested.append)
+
+    assert window.wizard.alignment_mode.currentData() == "gpa"
+    assert not window.wizard.reference_sample.isEnabled()
+    window.wizard.alignment_mode.setCurrentIndex(1)
+    window.wizard.start_analysis_button.click()
+    assert requested == []
+    assert "参考耳" in window.wizard.options_error_label.text()
+
+    window.wizard.reference_sample.setText("T001_L")
+    window.wizard.start_analysis_button.click()
+
+    assert requested[0].alignment_mode == "fixed-reference"
+    assert requested[0].reference_sample == "T001_L"
+
+
+def test_run_options_emit_selected_parallel_worker_count(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    requested = []
+    window.wizard.start_requested.disconnect(window.start_analysis)
+    window.wizard.start_requested.connect(requested.append)
+    window.wizard.parallel_workers.setCurrentIndex(2)
+
+    window.wizard.start_analysis_button.click()
+
+    assert requested[0].parallel_workers == 2
+
+
+def test_invalid_run_options_show_an_inline_error_without_starting(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    requested = []
+    window.wizard.start_requested.connect(requested.append)
+    window.wizard.max_unmapped_ratio.setText("not-a-number")
+
+    window.wizard.start_analysis_button.click()
+
+    assert requested == []
+    assert not window.wizard.options_error_label.isHidden()
+    assert "数字" in window.wizard.options_error_label.text()
+
+
+def test_result_workbench_uses_dark_text_on_its_light_sidebar(qtbot):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+
+    assert "#resultSidebar { background: #ffffff; color: #19242d;" in window.styleSheet()
+    assert "#resultSidebar QComboBox { color: #19242d;" in window.styleSheet()
+    assert "#resultSampleSelector QAbstractItemView { color: #19242d;" in window.styleSheet()
+    assert "#pcaScoresPanel, #viewerPanel { background: #ffffff;" in window.styleSheet()
+    assert "#pcaScoresTitle, #viewerTitle { color: #17242f;" in window.styleSheet()
 
 
 def test_creating_project_moves_to_import_page(qtbot, tmp_path: Path):
@@ -212,6 +278,23 @@ def test_import_inputs_runs_validation_and_opens_options_when_valid(qtbot, tmp_p
     assert window.result_workbench.index is not None
 
 
+def test_import_failure_is_shown_in_the_import_page(qtbot, tmp_path: Path):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    window.create_project(str(tmp_path / "project"), "项目")
+
+    result = window.import_project_inputs(
+        tmp_path / "missing-mesh",
+        tmp_path / "missing-landmarks",
+        tmp_path / "missing-region.csv",
+    )
+
+    assert result is None
+    assert window.workflow.current_page == "import"
+    assert not window.wizard.import_error_label.isHidden()
+    assert "导入失败" in window.wizard.import_error_label.text()
+
+
 def test_guided_pages_follow_the_approved_sequence(qtbot):
     window = MainWindow(
         ProjectService(),
@@ -223,7 +306,29 @@ def test_guided_pages_follow_the_approved_sequence(qtbot):
     assert window.workflow.page_ids == (
         "project", "import", "validation", "options", "monitor"
     )
-    assert window.navigation_labels == ("项目", "分析流程", "结果复核", "专家模式", "运行记录")
+    assert window.navigation_labels == ("项目", "分析流程", "结果复核", "专家恢复", "运行记录")
     assert window.wizard.stack.widget(4) is window.run_monitor
     assert window.content_stack.widget(1) is window.result_workbench
     assert window.content_stack.widget(2) is window.expert_mode
+
+
+def test_analysis_navigation_restores_the_active_run_monitor(qtbot, tmp_path: Path):
+    window = MainWindow(ProjectService(), ValidationService(), RunController(process_factory=FakeProcess))
+    qtbot.addWidget(window)
+    project = window.create_project(str(tmp_path / "project"), "项目")
+    window.workflow.issues = []
+    window.run_controller.start(project, RunOptions())
+    window.workflow.go_to("monitor")
+
+    window._navigate(0)
+    assert window.workflow.current_page == "project"
+    window._navigate(1)
+
+    assert window.content_stack.currentWidget() is window.wizard
+    assert window.workflow.current_page == "monitor"
+    assert window.wizard.stack.currentWidget() is window.run_monitor
+
+    window._navigate(2)
+    window._navigate(1)
+
+    assert window.wizard.stack.currentWidget() is window.run_monitor

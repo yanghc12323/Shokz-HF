@@ -33,6 +33,11 @@ class RunController(QObject):
         self._recovery_option: RecoveryOption | None = None
 
     @property
+    def supports_process_control(self) -> bool:
+        """Recovery scripts have no safe pause/cancel checkpoint protocol."""
+        return self._recovery_option is None
+
+    @property
     def control_path(self) -> Path:
         return self._require_attempt().root / "control.json"
 
@@ -62,6 +67,9 @@ class RunController(QObject):
             "--max-salvage-unmapped-ratio", str(options.max_salvage_unmapped_ratio),
             "--max-salvage-degenerate-ratio", str(options.max_salvage_degenerate_ratio),
             "--pca-variance-threshold", str(options.pca_variance_threshold),
+            "--qc-figure-mode", options.qc_figure_mode,
+            "--alignment-mode", options.alignment_mode,
+            "--parallel-workers", str(options.parallel_workers),
         ]
         if options.sample_tags:
             arguments.extend(["--samples", *options.sample_tags])
@@ -168,6 +176,30 @@ class RunController(QObject):
         for event in events:
             self.event_received.emit(event)
         return events
+
+    def refresh_control_status(self) -> AttemptRecord:
+        """Reflect the pipeline's safe-checkpoint pause acknowledgement in the UI."""
+        attempt = self._require_attempt()
+        if attempt.status in {RunStatus.CANCELLED, RunStatus.COMPLETED, RunStatus.FAILED}:
+            return attempt
+        if not self.control_path.is_file():
+            return attempt
+        try:
+            payload = json.loads(self.control_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            return attempt
+        status = {
+            "RUNNING": RunStatus.RUNNING,
+            "PAUSE_REQUESTED": RunStatus.PAUSE_REQUESTED,
+            "PAUSED": RunStatus.PAUSED,
+        }.get(str(payload.get("status", "")).upper())
+        if status is None or status is attempt.status:
+            return attempt
+        updated = replace(attempt, status=status)
+        self.active_attempt = updated
+        self._write_state(updated)
+        self.attempt_changed.emit(updated)
+        return updated
 
     def refresh_terminal_status(self) -> AttemptRecord:
         attempt = self._require_attempt()

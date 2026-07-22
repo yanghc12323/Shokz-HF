@@ -20,16 +20,39 @@ class FileRunControl:
 
     def checkpoint(self) -> None:
         """Block while paused and raise only for an explicit cancellation."""
-        while self._status() == "PAUSE_REQUESTED":
-            time.sleep(self.poll_seconds)
-        if self._status() == "CANCEL_REQUESTED":
-            raise RunCancelled("run cancelled by desktop controller")
+        while True:
+            status = self._status()
+            if status == "PAUSE_REQUESTED":
+                self._write_status("PAUSED")
+                continue
+            if status == "PAUSED":
+                time.sleep(self.poll_seconds)
+                continue
+            if status == "CANCEL_REQUESTED":
+                raise RunCancelled("run cancelled by desktop controller")
+            return
+
+    def _write_status(self, status: str) -> None:
+        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
+        temporary.write_text(json.dumps({"status": status}), encoding="utf-8")
+        for _ in range(20):
+            try:
+                temporary.replace(self.path)
+                return
+            except PermissionError:
+                time.sleep(self.poll_seconds)
+        temporary.replace(self.path)
 
     def _status(self) -> str:
         if not self.path.exists():
             return "RUNNING"
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        while True:
+            try:
+                payload = json.loads(self.path.read_text(encoding="utf-8"))
+                break
+            except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+                time.sleep(self.poll_seconds)
         status = str(payload.get("status", "RUNNING")).upper()
-        if status not in {"RUNNING", "PAUSE_REQUESTED", "CANCEL_REQUESTED"}:
+        if status not in {"RUNNING", "PAUSE_REQUESTED", "PAUSED", "CANCEL_REQUESTED"}:
             raise ValueError(f"invalid run-control status: {status}")
         return status

@@ -23,9 +23,18 @@ from ear_param.alignment import (
     fixed_reference_alignment,
     generalized_procrustes,
 )
+from ear_param.pipeline import landmark_tag_for_sample, split_sample_tag
 
 
 DEFAULT_LANDMARKS = ("L7", "L13", "L15", "L26")
+
+
+def _landmark_path(landmarks_dir: Path, sample_tag: str) -> Path:
+    """Prefer canonical outputs; fall back to the source T landmark name for MQ meshes."""
+    canonical_path = landmarks_dir / f"{sample_tag}_landmarks.csv"
+    if canonical_path.is_file():
+        return canonical_path
+    return landmarks_dir / f"{landmark_tag_for_sample(sample_tag)}_landmarks.csv"
 
 
 def main() -> None:
@@ -61,14 +70,16 @@ def main() -> None:
     if len(input_layers) != 1:
         raise SystemExit("All aligned samples must come from one whole-ear input layer.")
     input_layer = input_layers.pop()
-    sides = {args.canonical_side} if args.canonical_side else {sample_tag.rsplit("_", 1)[-1] for sample_tag in sample_tags}
+    sides = {args.canonical_side} if args.canonical_side else {
+        split_sample_tag(sample_tag)[1] for sample_tag in sample_tags
+    }
     if len(sides) != 1:
         raise SystemExit("Mixed left/right samples require an explicit mirror-normalization stage.")
 
     landmark_ids = tuple(str(value) for value in args.alignment_landmarks)
     landmark_sets = {
         sample_tag: _load_landmarks(
-            landmarks_dir / f"{sample_tag}_landmarks.csv", landmark_ids
+            _landmark_path(landmarks_dir, sample_tag), landmark_ids,
         )
         for sample_tag in sample_tags
     }

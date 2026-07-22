@@ -43,6 +43,9 @@ def test_desktop_command_builds_the_same_pipeline_config_as_cli(tmp_path: Path):
         max_salvage_degenerate_ratio=0.01,
         pca_variance_threshold=0.8,
         reference_sample="T001_L",
+        qc_figure_mode="repaired-fail",
+        alignment_mode="fixed-reference",
+        parallel_workers=0,
     )
     attempt = controller.start(project_with_copied_inputs(tmp_path), options)
 
@@ -58,3 +61,9 @@ def test_desktop_command_builds_the_same_pipeline_config_as_cli(tmp_path: Path):
     assert config.max_salvage_degenerate_ratio == 0.01
     assert config.pca_variance_threshold == 0.8
     assert config.reference_sample == "T001_L"
+    assert config.alignment_mode == "fixed-reference"
+    assert config.qc_figure_mode == "repaired-fail"
+    assert config.parallel_workers == 0
+    assert controller.last_command[controller.last_command.index("--qc-figure-mode") + 1] == "repaired-fail"
+    assert controller.last_command[controller.last_command.index("--alignment-mode") + 1] == "fixed-reference"
+    assert controller.last_command[controller.last_command.index("--parallel-workers") + 1] == "0"

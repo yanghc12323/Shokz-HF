@@ -34,6 +34,30 @@ def test_checkpoint_waits_until_desktop_marks_control_running(tmp_path: Path):
     assert not thread.is_alive()
 
 
+def test_checkpoint_acknowledges_pause_before_waiting_for_resume(tmp_path: Path):
+    control_path = tmp_path / "control.json"
+    _write_status(control_path, "PAUSE_REQUESTED")
+    control = FileRunControl(control_path, poll_seconds=0.001)
+    thread = Thread(target=control.checkpoint)
+
+    thread.start()
+    try:
+        deadline = time.monotonic() + 1
+        status = ""
+        while status != "PAUSED":
+            assert time.monotonic() < deadline
+            try:
+                status = json.loads(control_path.read_text(encoding="utf-8"))["status"]
+            except OSError:
+                pass
+            time.sleep(0.001)
+    finally:
+        _write_status(control_path, "RUNNING")
+        thread.join(timeout=1)
+
+    assert not thread.is_alive()
+
+
 def test_checkpoint_raises_when_desktop_requests_cancellation(tmp_path: Path):
     control_path = tmp_path / "control.json"
     _write_status(control_path, "CANCEL_REQUESTED")

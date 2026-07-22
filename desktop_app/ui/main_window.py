@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from desktop_app.models import ProjectRecord
+from desktop_app.models import ProjectRecord, RunStatus
 from desktop_app.artifact_indexer import ArtifactIndexer
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
@@ -24,6 +24,7 @@ from desktop_app.ui.project_wizard import ProjectWizard
 from desktop_app.ui.expert_mode import ExpertMode
 from desktop_app.ui.result_workbench import ResultWorkbench
 from desktop_app.ui.run_monitor import RunMonitor
+from desktop_app.ui.run_history import RunHistoryPanel
 from desktop_app.validation_service import ValidationService
 from desktop_app.recovery_service import RecoveryService
 
@@ -31,7 +32,7 @@ from desktop_app.recovery_service import RecoveryService
 class MainWindow(QMainWindow):
     """The app shell keeps the default path visible and expert work isolated."""
 
-    navigation_labels = ("项目", "分析流程", "结果复核", "专家模式", "运行记录")
+    navigation_labels = ("项目", "分析流程", "结果复核", "专家恢复", "运行记录")
 
     def __init__(
         self,
@@ -44,7 +45,7 @@ class MainWindow(QMainWindow):
         self.validation_service = validation_service
         self.run_controller = run_controller
         self.project: ProjectRecord | None = None
-        self.setWindowTitle("耳廓工程分析")
+        self.setWindowTitle("Shokz-耳部降采样分析系统")
         self.resize(1280, 800)
         self.setMinimumSize(1024, 680)
 
@@ -62,11 +63,13 @@ class MainWindow(QMainWindow):
         self.wizard.monitor_placeholder.deleteLater()
         self.wizard.stack.insertWidget(4, self.run_monitor)
         self.result_workbench = ResultWorkbench()
-        self.expert_mode = ExpertMode(RecoveryService(), run_controller)
+        self.recovery_service = RecoveryService()
+        self.expert_mode = ExpertMode(self.recovery_service, run_controller)
+        self.run_history = RunHistoryPanel(self.recovery_service)
         self.content_stack.addWidget(self.wizard)
         self.content_stack.addWidget(self.result_workbench)
         self.content_stack.addWidget(self.expert_mode)
-        self.content_stack.addWidget(self._placeholder("运行记录", "查看本项目的运行、失败原因和恢复尝试。"))
+        self.content_stack.addWidget(self.run_history)
         root_layout.addWidget(self.content_stack, 1)
         self.setCentralWidget(root)
         self.wizard.project_requested.connect(self.create_project)
@@ -77,6 +80,8 @@ class MainWindow(QMainWindow):
         )
         self.wizard.start_requested.connect(self.start_analysis)
         self.run_controller.run_finished.connect(self.load_completed_attempt)
+        self.run_history.recovery_requested.connect(self.open_recovery_attempt)
+        self.expert_mode.recovery_started.connect(self.show_recovery_monitor)
         self._apply_style()
 
     def _build_sidebar(self) -> QWidget:
@@ -85,9 +90,9 @@ class MainWindow(QMainWindow):
         sidebar.setFixedWidth(220)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 20, 16, 18)
-        brand = QLabel("耳廓工程分析")
+        brand = QLabel("Shokz-耳部降采样分析系统")
         brand.setObjectName("brand")
-        caption = QLabel("LOCAL ENGINEERING")
+        caption = QLabel("EAR DOWNSAMPLING ANALYSIS")
         caption.setObjectName("caption")
         layout.addWidget(brand)
         layout.addWidget(caption)
@@ -120,6 +125,8 @@ class MainWindow(QMainWindow):
 
     def _navigate(self, index: int) -> None:
         if index == 1:
+            if self._has_running_attempt():
+                self.workflow.go_to("monitor")
             self.content_stack.setCurrentWidget(self.wizard)
             return
         if index == 0:
@@ -127,6 +134,14 @@ class MainWindow(QMainWindow):
             self.content_stack.setCurrentWidget(self.wizard)
             return
         self.content_stack.setCurrentIndex(index - 1)
+
+    def _has_running_attempt(self) -> bool:
+        attempt = self.run_controller.active_attempt
+        return attempt is not None and attempt.status in {
+            RunStatus.RUNNING,
+            RunStatus.PAUSE_REQUESTED,
+            RunStatus.PAUSED,
+        }
 
     def create_project(self, root: str, name: str) -> ProjectRecord | None:
         try:
@@ -136,6 +151,7 @@ class MainWindow(QMainWindow):
             return None
         self.project = project
         self.expert_mode.set_project(project)
+        self.run_history.set_project(project)
         self.wizard.clear_project_error()
         self.workflow.begin_import(project)
         self.content_stack.setCurrentWidget(self.wizard)
@@ -150,6 +166,7 @@ class MainWindow(QMainWindow):
     def open_project(self, project: ProjectRecord) -> None:
         self.project = project
         self.expert_mode.set_project(project)
+        self.run_history.set_project(project)
         issues = self.validation_service.validate(project)
         self.validation_page.set_issues(issues)
         self.workflow.set_project(project, issues)
@@ -160,16 +177,22 @@ class MainWindow(QMainWindow):
         mesh_dir: Path,
         landmarks_dir: Path,
         region_table: Path,
-    ) -> ProjectRecord:
+    ) -> ProjectRecord | None:
         if self.project is None:
-            raise RuntimeError("请先创建或打开项目")
-        project = self.project_service.import_inputs(
-            self.project,
-            mesh_dir=mesh_dir,
-            landmarks_dir=landmarks_dir,
-            region_table=region_table,
-        )
+            self.wizard.show_import_error("导入失败：请先创建或打开项目。")
+            return None
+        try:
+            project = self.project_service.import_inputs(
+                self.project,
+                mesh_dir=mesh_dir,
+                landmarks_dir=landmarks_dir,
+                region_table=region_table,
+            )
+        except (OSError, ValueError) as error:
+            self.wizard.show_import_error(f"导入失败：{error}")
+            return None
         self.project = project
+        self.wizard.clear_import_error()
         issues = self.validation_service.validate(project)
         self.validation_page.set_issues(issues)
         self.workflow.set_project(project, issues)
@@ -184,10 +207,22 @@ class MainWindow(QMainWindow):
         self.workflow.go_to("monitor")
 
     def load_completed_attempt(self, attempt) -> None:
+        if self.project is not None:
+            self.run_history.refresh()
         if str(attempt.status) != "COMPLETED":
             return
         self.result_workbench.set_attempt(ArtifactIndexer().index(attempt))
         self.content_stack.setCurrentWidget(self.result_workbench)
+
+    def open_recovery_attempt(self, attempt) -> None:
+        if self.project is None or attempt.project_root != self.project.root:
+            return
+        self.expert_mode.set_attempt(attempt)
+        self.content_stack.setCurrentWidget(self.expert_mode)
+
+    def show_recovery_monitor(self, _attempt) -> None:
+        self.workflow.go_to("monitor")
+        self.content_stack.setCurrentWidget(self.wizard)
 
     def _apply_style(self) -> None:
         self.setStyleSheet("""
@@ -201,6 +236,30 @@ class MainWindow(QMainWindow):
             #pageTitle { color: #17242f; font-size: 25px; font-weight: 700; }
             #pageSubtitle { color: #657782; font-size: 13px; }
             #contentCard { background: #ffffff; border: 1px solid #d9e2e7; border-radius: 7px; padding: 16px; }
+            #resultSidebar { background: #ffffff; color: #19242d; border: 1px solid #d9e2e7; border-radius: 7px; }
+            #resultSidebarScroll { background: transparent; }
+            #resultSidebar QLabel { color: #19242d; }
+            #resultTitle { color: #17242f; font-size: 22px; font-weight: 700; padding: 2px 0 4px 0; }
+            #resultSectionTitle { color: #2e5968; font-size: 15px; font-weight: 700; padding-top: 6px; }
+            #pcaSummary { color: #657782; font-size: 12px; }
+            #resultSidebar QComboBox { color: #19242d; background: #fbfcfd; border: 1px solid #cfdbe1; padding: 6px; }
+            #resultSidebar QLineEdit { color: #19242d; background: #fbfcfd; }
+            #resultSidebar QToolButton { color: #19242d; background: #f4f7f8; padding: 7px; text-align: left; }
+            #resultSidebar QTableWidget { color: #263843; background: #fbfcfd; alternate-background-color: #f2f6f7; border: 1px solid #d4e0e4; gridline-color: #e1e9ec; }
+            #resultSidebar QHeaderView::section { color: #365260; background: #e9f0f2; border: 0; border-bottom: 1px solid #cddce1; padding: 5px; font-weight: 600; }
+            #resultSampleSelector QAbstractItemView { color: #19242d; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
+            #pcaScoresPanel, #viewerPanel { background: #ffffff; color: #19242d; border: 1px solid #d9e2e7; border-radius: 7px; }
+            #pcaScoresTitle, #viewerTitle { color: #17242f; font-size: 16px; font-weight: 700; }
+            #pcaScoresCaption { color: #657782; font-size: 12px; }
+            #pcaScoresPanel QTableWidget { color: #263843; background: #fbfcfd; alternate-background-color: #f2f6f7; border: 1px solid #d4e0e4; gridline-color: #e1e9ec; }
+            #pcaScoresPanel QHeaderView::section { color: #365260; background: #e9f0f2; border: 0; border-bottom: 1px solid #cddce1; padding: 5px; font-weight: 600; }
+            #resultReviewSplitter::handle { background: #dce5e9; height: 7px; margin: 5px 0; border-radius: 3px; }
+            #qcFigureMode { color: #37474f; background: #eef1f3; border: 1px solid #c6d0d6; border-radius: 4px; padding: 7px; }
+            #qcFigureMode QAbstractItemView { color: #37474f; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
+            #alignmentMode { color: #37474f; background: #eef1f3; border: 1px solid #c6d0d6; border-radius: 4px; padding: 7px; }
+            #alignmentMode QAbstractItemView { color: #37474f; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
+            #parallelWorkers { color: #37474f; background: #eef1f3; border: 1px solid #c6d0d6; border-radius: 4px; padding: 7px; }
+            #parallelWorkers QAbstractItemView { color: #37474f; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
             #validationSummary { color: #8e4b1f; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 5px; padding: 10px; }
             #validationIssues { color: #5a6972; padding: 8px 2px; }
             #runStatus { color: #0d5e6f; font-size: 14px; font-weight: 600; }

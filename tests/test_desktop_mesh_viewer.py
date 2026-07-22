@@ -20,6 +20,15 @@ class FakePlotter(QLabel):
     def reset_camera(self) -> None:
         self.calls.append(("reset_camera", None))
 
+    def set_background(self, color) -> None:
+        self.calls.append(("set_background", color))
+
+    def add_axes(self, **kwargs) -> None:
+        self.calls.append(("add_axes", kwargs))
+
+    def add_text(self, text, **kwargs) -> None:
+        self.calls.append(("add_text", (text, kwargs)))
+
 
 def test_mesh_viewer_loads_a_supported_mesh_and_tracks_region(qtbot, tmp_path: Path):
     import pyvista as pv
@@ -37,6 +46,9 @@ def test_mesh_viewer_loads_a_supported_mesh_and_tracks_region(qtbot, tmp_path: P
     assert viewer.highlighted_region == "R01"
     assert any(call[0] == "add_mesh" for call in viewer.plotter.calls)
     assert any(call[0] == "reset_camera" for call in viewer.plotter.calls)
+    assert ("set_background", "#eef4f6") in viewer.plotter.calls
+    assert any(call[0] == "add_axes" for call in viewer.plotter.calls)
+    assert any(call[0] == "add_text" for call in viewer.plotter.calls)
 
 
 def test_mesh_viewer_rejects_headless_vtk_before_creating_a_render_window(monkeypatch, qtbot, tmp_path: Path):

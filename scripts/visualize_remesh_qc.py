@@ -14,6 +14,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 import pandas as pd
 
 from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
+from ear_param.pipeline import discover_sample_inputs, split_sample_tag
 from ear_param.qc_visualization import (
     classify_region_qc,
     classify_repaired_region_qc,
@@ -31,16 +32,26 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example:
-  python scripts/visualize_remesh_qc.py --samples T076_L T077_L
-  python scripts/visualize_remesh_qc.py --samples T076_L T077_L --region_ids T001 T008
+  python scripts/visualize_remesh_qc.py --samples MQ_S076L MQ_S077L
+  python scripts/visualize_remesh_qc.py --samples MQ_S076L MQ_S077L --region_ids T001 T008
         """,
     )
-    parser.add_argument("--samples", nargs="+", help="Sample tags, e.g. T076_L T077_L.")
+    parser.add_argument("--samples", nargs="+", help="Sample tags, e.g. MQ_S076L MQ_S077L.")
     parser.add_argument("--region_ids", nargs="+", help="Optional subset of region IDs.")
     parser.add_argument("--data_dir", default="data", help="Input data directory.")
     parser.add_argument("--regions", default="config/region_table.csv", help="Region table CSV path.")
     parser.add_argument("--out_dir", default="output/qc_visualizations_r24", help="Output root directory.")
+    parser.add_argument(
+        "--summary-dir",
+        help="Optional QC summary root; figures always remain under --out_dir.",
+    )
     parser.add_argument("--max_patch_faces", type=int, default=5000, help="Max patch faces drawn per 3D figure.")
+    parser.add_argument(
+        "--figure-mode",
+        choices=("all", "repaired-fail", "none"),
+        default="all",
+        help="PNG generation mode; QC summaries are always written.",
+    )
     parser.add_argument(
         "--max_salvage_unmapped_ratio",
         type=float,
@@ -57,16 +68,26 @@ Example:
 
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)
+    summary_dir = summary_output_root(out_dir, Path(args.summary_dir) if args.summary_dir else None)
     raw_out_dir = out_dir / "raw"
     repaired_out_dir = out_dir / "repaired"
     salvaged_out_dir = out_dir / "salvaged"
     raw_out_dir.mkdir(parents=True, exist_ok=True)
     repaired_out_dir.mkdir(parents=True, exist_ok=True)
     salvaged_out_dir.mkdir(parents=True, exist_ok=True)
+    (summary_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (summary_dir / "repaired").mkdir(parents=True, exist_ok=True)
+    (summary_dir / "salvaged").mkdir(parents=True, exist_ok=True)
 
     sample_tags = args.samples if args.samples else _discover_sample_tags(data_dir)
     if not sample_tags:
         raise SystemExit("No samples found. Use --samples or add meshes to data/clean_mesh.")
+    source_inputs = {
+        str(row.sample_tag): row
+        for row in discover_sample_inputs(
+            data_dir / "clean_mesh", data_dir / "landmarks"
+        ).itertuples(index=False)
+    }
 
     regions = read_csv_robust(Path(args.regions))
     if args.region_ids:
@@ -80,8 +101,12 @@ Example:
     salvaged_summary_records: list[dict[str, object]] = []
     for sample_tag in sample_tags:
         sample_id, side = _split_sample_tag(sample_tag)
-        mesh_path = data_dir / "clean_mesh" / f"{sample_tag}.ply"
-        landmarks_path = data_dir / "landmarks" / f"{sample_tag}_landmarks.csv"
+        try:
+            source = source_inputs[sample_tag]
+        except KeyError as exc:
+            raise SystemExit(f"Input sample not found: {sample_tag}") from exc
+        mesh_path = Path(source.mesh_path)
+        landmarks_path = Path(source.landmarks_path)
         print(f"[QC] Loading {sample_tag}")
         mesh = load_mesh(mesh_path)
         landmarks = load_landmarks(landmarks_path)
@@ -96,35 +121,8 @@ Example:
             try:
                 result = build_region_remesh(mesh, landmarks, region)
                 raw_record = classify_region_qc(sample_tag, result)
-                raw_record.update({
-                    "sample_id": sample_id,
-                    "side": side,
-                    "figure_path": str(raw_figure_path),
-                    "error": "",
-                })
-                save_region_qc_figure(
-                    mesh,
-                    result,
-                    raw_figure_path,
-                    max_patch_faces=args.max_patch_faces,
-                )
-
                 repaired = repair_unmapped_samples(result)
                 repaired_record = classify_repaired_region_qc(sample_tag, result, repaired)
-                repaired_record.update({
-                    "sample_id": sample_id,
-                    "side": side,
-                    "figure_path": str(repaired_figure_path),
-                    "error": "",
-                })
-                save_region_repaired_qc_figure(
-                    mesh,
-                    result,
-                    repaired,
-                    repaired_figure_path,
-                    max_patch_faces=args.max_patch_faces,
-                )
-
                 salvaged = repair_unmapped_samples(
                     result,
                     allow_raw_fail_repair=True,
@@ -132,19 +130,33 @@ Example:
                     max_raw_fail_repair_degenerate_ratio=args.max_salvage_degenerate_ratio,
                 )
                 salvaged_record = classify_repaired_region_qc(sample_tag, result, salvaged)
+                figure_layers = figure_layers_for_mode(
+                    args.figure_mode, str(repaired_record["status"])
+                )
+                raw_record.update({
+                    "sample_id": sample_id,
+                    "side": side,
+                    "figure_path": str(raw_figure_path) if "raw" in figure_layers else "",
+                    "error": "",
+                })
+                repaired_record.update({
+                    "sample_id": sample_id,
+                    "side": side,
+                    "figure_path": str(repaired_figure_path) if "repaired" in figure_layers else "",
+                    "error": "",
+                })
                 salvaged_record.update({
                     "sample_id": sample_id,
                     "side": side,
-                    "figure_path": str(salvaged_figure_path),
+                    "figure_path": str(salvaged_figure_path) if "salvaged" in figure_layers else "",
                     "error": "",
                 })
-                save_region_repaired_qc_figure(
-                    mesh,
-                    result,
-                    salvaged,
-                    salvaged_figure_path,
-                    max_patch_faces=args.max_patch_faces,
-                )
+                if "raw" in figure_layers:
+                    save_region_qc_figure(mesh, result, raw_figure_path, max_patch_faces=args.max_patch_faces)
+                if "repaired" in figure_layers:
+                    save_region_repaired_qc_figure(mesh, result, repaired, repaired_figure_path, max_patch_faces=args.max_patch_faces)
+                if "salvaged" in figure_layers:
+                    save_region_repaired_qc_figure(mesh, result, salvaged, salvaged_figure_path, max_patch_faces=args.max_patch_faces)
             except Exception as exc:
                 raw_record = {
                     "sample_tag": sample_tag,
@@ -192,9 +204,9 @@ Example:
     raw_summary = pd.DataFrame(raw_summary_records)
     repaired_summary = pd.DataFrame(repaired_summary_records)
     salvaged_summary = pd.DataFrame(salvaged_summary_records)
-    raw_summary_path = raw_out_dir / "qc_visualization_summary.csv"
-    repaired_summary_path = repaired_out_dir / "qc_visualization_summary.csv"
-    salvaged_summary_path = salvaged_out_dir / "qc_visualization_summary.csv"
+    raw_summary_path = summary_dir / "raw" / "qc_visualization_summary.csv"
+    repaired_summary_path = summary_dir / "repaired" / "qc_visualization_summary.csv"
+    salvaged_summary_path = summary_dir / "salvaged" / "qc_visualization_summary.csv"
     raw_summary.to_csv(raw_summary_path, index=False)
     repaired_summary.to_csv(repaired_summary_path, index=False)
     salvaged_summary.to_csv(salvaged_summary_path, index=False)
@@ -213,11 +225,22 @@ def _discover_sample_tags(data_dir: Path) -> list[str]:
     return sorted(path.stem for path in mesh_dir.glob("*.ply"))
 
 
+def summary_output_root(out_dir: Path, summary_dir: Path | None) -> Path:
+    """Return the QC summary root without changing legacy default output paths."""
+    return Path(summary_dir) if summary_dir is not None else Path(out_dir)
+
+
 def _split_sample_tag(sample_tag: str) -> tuple[str, str]:
-    if "_" not in sample_tag:
-        raise ValueError(f"sample tag must look like <sample_id>_<side>: {sample_tag}")
-    sample_id, side = sample_tag.rsplit("_", 1)
-    return sample_id, side
+    return split_sample_tag(sample_tag)
+
+
+def figure_layers_for_mode(mode: str, repaired_status: str) -> set[str]:
+    """Return the output layers whose Region QC PNGs should be rendered."""
+    if mode == "all":
+        return {"raw", "repaired", "salvaged"}
+    if mode == "repaired-fail" and repaired_status.upper() == "FAIL":
+        return {"repaired"}
+    return set()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from desktop_app.models import AttemptRecord, ProjectRecord
@@ -9,6 +10,8 @@ from desktop_app.recovery_service import RecoveryOption, RecoveryService
 
 
 class ExpertMode(QWidget):
+    recovery_started = Signal(object)
+
     def __init__(self, recovery_service: RecoveryService, controller) -> None:
         super().__init__()
         self.recovery_service = recovery_service
@@ -16,7 +19,10 @@ class ExpertMode(QWidget):
         self.project: ProjectRecord | None = None
         self.parent: AttemptRecord | None = None
         layout = QVBoxLayout(self)
-        self.summary_label = QLabel("选择失败运行后，可重跑已验证的后续阶段。")
+        self.summary_label = QLabel(
+            "专家恢复：仅用于失败或取消的运行。从“运行记录”选择一次运行后，"
+            "可在不改写原结果的前提下重跑已验证的后续阶段。"
+        )
         self.summary_label.setWordWrap(True)
         layout.addWidget(self.summary_label)
         self._buttons: dict[RecoveryOption, QPushButton] = {}
@@ -45,7 +51,8 @@ class ExpertMode(QWidget):
             raise RuntimeError("请先选择项目和失败运行")
         if option not in self.recovery_service.plan(self.parent):
             raise ValueError("该阶段缺少已验证的父运行输入")
-        self.controller.start_recovery(self.project, self.parent, option)
+        attempt = self.controller.start_recovery(self.project, self.parent, option)
+        self.recovery_started.emit(attempt)
 
     def _set_options(self, available: list[RecoveryOption]) -> None:
         for option, button in self._buttons.items():

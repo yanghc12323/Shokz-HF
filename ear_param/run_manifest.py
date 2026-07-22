@@ -12,7 +12,12 @@ import platform
 import subprocess
 
 from ear_param.io_utils import read_csv_robust
-from ear_param.pipeline import PipelineConfig, PipelineResult, discover_samples
+from ear_param.pipeline import (
+    PipelineConfig,
+    PipelineResult,
+    _effective_parallel_workers,
+    discover_sample_inputs,
+)
 
 
 RAW_QC_POLICY = {
@@ -121,17 +126,15 @@ def create_run_manifest(
 ) -> dict[str, object]:
     """Collect JSON-safe provenance without changing pipeline inputs or outputs."""
     region_resolution = _region_resolution(config.regions)
-    discovered = discover_samples(config.mesh_dir, config.landmarks_dir)
+    discovered = discover_sample_inputs(config.mesh_dir, config.landmarks_dir)
     if config.sample_tags:
         discovered = discovered[discovered["sample_tag"].isin(config.sample_tags)]
     inputs = []
-    for sample_tag in discovered["sample_tag"].astype(str):
+    for row in discovered.itertuples(index=False):
         inputs.append({
-            "sample_tag": sample_tag,
-            "mesh": _file_metadata(config.mesh_dir / f"{sample_tag}.ply", project_root),
-            "landmarks": _file_metadata(
-                config.landmarks_dir / f"{sample_tag}_landmarks.csv", project_root
-            ),
+            "sample_tag": str(row.sample_tag),
+            "mesh": _file_metadata(Path(row.mesh_path), project_root),
+            "landmarks": _file_metadata(Path(row.landmarks_path), project_root),
         })
     edge_controls = config.regions.parent / "edge_control_points.csv"
     return {
@@ -157,7 +160,12 @@ def create_run_manifest(
             "max_salvage_degenerate_ratio": config.max_salvage_degenerate_ratio,
             "raw_qc_policy": dict(RAW_QC_POLICY),
             "pca_variance_threshold": config.pca_variance_threshold,
+            "alignment_mode": config.alignment_mode,
             "reference_sample": config.reference_sample,
+            "parallel_workers_requested": config.parallel_workers,
+            "parallel_workers_effective": _effective_parallel_workers(
+                config.parallel_workers
+            ),
         },
         "inputs": inputs,
         "config_files": {
@@ -253,6 +261,11 @@ def finish_manifest(
             "reference_pca_status": result.reference_pca_status,
             "pca_result": _json_safe(result.pca_result),
             "reference_pca_result": _json_safe(result.reference_pca_result),
+            "timing_record_count": len(result.stage_timings),
+            "total_elapsed_seconds": round(
+                sum(float(item.get("elapsed_seconds", 0.0)) for item in result.stage_timings),
+                6,
+            ),
         }
     write_manifest(path, manifest)
     return manifest

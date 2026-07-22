@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QFormLayout,
+    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -182,6 +183,14 @@ class ProjectWizard(QWidget):
         self.project_error_label.clear()
         self.project_error_label.hide()
 
+    def show_import_error(self, message: str) -> None:
+        self.import_error_label.setText(message)
+        self.import_error_label.show()
+
+    def clear_import_error(self) -> None:
+        self.import_error_label.clear()
+        self.import_error_label.hide()
+
     def _build_import_page(self) -> QWidget:
         page, layout = _page("导入数据", "导入后软件只使用项目目录中的副本，原始数据不会被改写。")
         card = QFrame()
@@ -206,7 +215,12 @@ class ProjectWizard(QWidget):
                 self.region_source.text(),
             )
         )
+        self.import_error_label = QLabel()
+        self.import_error_label.setObjectName("projectError")
+        self.import_error_label.setWordWrap(True)
+        self.import_error_label.hide()
         form.addRow("", button)
+        form.addRow("", self.import_error_label)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
@@ -256,7 +270,6 @@ class ProjectWizard(QWidget):
             ("最大 Salvage 未映射比例", "0.35", "允许 Salvage 的最大未映射比例，取值 0–1；默认 0.35。"),
             ("最大 Salvage 退化比例", "0.015", "允许 Salvage 的最大退化面比例，取值 0–1；默认 0.015。"),
             ("PCA 累积解释方差", "0.75", "PCA 保留的最小累计解释方差，取值 0–1；默认 0.75。"),
-            ("固定参考耳（可选）", "", "指定一个样本标签作为固定参考耳，例如 T001_L；留空则不启用。"),
         ):
             editor = QLineEdit(value)
             editor.setToolTip(hint)
@@ -273,22 +286,108 @@ class ProjectWizard(QWidget):
             self.max_unmapped_ratio,
             self.max_degenerate_ratio,
             self.pca_variance_threshold,
-            self.reference_sample,
         ) = editors
+        self.alignment_mode = QComboBox()
+        self.alignment_mode.setObjectName("alignmentMode")
+        self.alignment_mode.addItem("GPA 配准（默认，推荐）", "gpa")
+        self.alignment_mode.addItem("固定参考耳配准", "fixed-reference")
+        self.alignment_mode.setToolTip("选择本次分析采用的刚性配准路径；固定参考耳模式必须填写一个通过 Weld 的样本标签。")
+        alignment_label = QLabel("刚性配准方式")
+        alignment_label.setObjectName("fieldLabel")
+        self.option_labels.append(alignment_label)
+        alignment_hint = QLabel("GPA 使用全体合格耳进行广义 Procrustes 配准；固定参考耳将所有合格耳配准到指定样本。")
+        alignment_hint.setObjectName("fieldHint")
+        alignment_hint.setWordWrap(True)
+        form.addRow(alignment_label, self.alignment_mode)
+        form.addRow("", alignment_hint)
+        self.reference_sample = QLineEdit()
+        self.reference_sample.setPlaceholderText("例如 MQ_S001L")
+        self.reference_sample.setToolTip("固定参考耳模式下必填；填写要作为参考耳的样本标签。该样本必须通过 Weld。")
+        self.reference_sample.setEnabled(False)
+        reference_label = QLabel("固定参考耳样本")
+        reference_label.setObjectName("fieldLabel")
+        self.option_labels.append(reference_label)
+        reference_hint = QLabel("仅在“固定参考耳配准”模式下启用。GPA 模式不会使用此项。")
+        reference_hint.setObjectName("fieldHint")
+        reference_hint.setWordWrap(True)
+        form.addRow(reference_label, self.reference_sample)
+        form.addRow("", reference_hint)
+        self.alignment_mode.currentIndexChanged.connect(self._update_reference_sample_state)
+        self.qc_figure_mode = QComboBox()
+        self.qc_figure_mode.setObjectName("qcFigureMode")
+        self.qc_figure_mode.addItem("全部生成（耗时最长）", "all")
+        self.qc_figure_mode.addItem("仅生成修复后 FAIL 区域（推荐）", "repaired-fail")
+        self.qc_figure_mode.addItem("不生成 QC 图（最快）", "none")
+        self.qc_figure_mode.setCurrentIndex(1)
+        self.qc_figure_mode.setToolTip("只影响 Region QC PNG，不影响 QC 判定、CSV 或后续门禁。")
+        qc_label = QLabel("Region QC 图生成")
+        qc_label.setObjectName("fieldLabel")
+        self.option_labels.append(qc_label)
+        form.addRow(qc_label, self.qc_figure_mode)
+        self.parallel_workers = QComboBox()
+        self.parallel_workers.setObjectName("parallelWorkers")
+        self.parallel_workers.addItem("自动（推荐，最多 4 个）", 0)
+        self.parallel_workers.addItem("1 个（串行）", 1)
+        self.parallel_workers.addItem("2 个", 2)
+        self.parallel_workers.addItem("4 个", 4)
+        self.parallel_workers.setToolTip("仅并行处理相互独立的样本 Remesh/QC；Weld、对齐和 PCA 保持串行。")
+        workers_label = QLabel("并行处理数")
+        workers_label.setObjectName("fieldLabel")
+        self.option_labels.append(workers_label)
+        workers_hint = QLabel("自动模式按本机 CPU 核心数选择 1–4 个任务；内存不足或电脑较慢时可改为 1 或 2。")
+        workers_hint.setObjectName("fieldHint")
+        workers_hint.setWordWrap(True)
+        form.addRow(workers_label, self.parallel_workers)
+        form.addRow("", workers_hint)
         self.start_analysis_button = QPushButton("一键开始分析")
         self.start_analysis_button.clicked.connect(self._emit_run_options)
+        self.options_error_label = QLabel()
+        self.options_error_label.setObjectName("projectError")
+        self.options_error_label.setWordWrap(True)
+        self.options_error_label.hide()
         form.addRow("", self.start_analysis_button)
+        form.addRow("", self.options_error_label)
         layout.addWidget(card)
         layout.addStretch(1)
         return page
 
+    def _update_reference_sample_state(self) -> None:
+        fixed_reference = self.alignment_mode.currentData() == "fixed-reference"
+        self.reference_sample.setEnabled(fixed_reference)
+        if not fixed_reference:
+            self.reference_sample.clear()
+
     def _emit_run_options(self) -> None:
+        try:
+            max_unmapped_ratio = float(self.max_unmapped_ratio.text())
+            max_degenerate_ratio = float(self.max_degenerate_ratio.text())
+            pca_variance_threshold = float(self.pca_variance_threshold.text())
+            if not all(0 <= value <= 1 for value in (
+                max_unmapped_ratio,
+                max_degenerate_ratio,
+                pca_variance_threshold,
+            )):
+                raise ValueError
+        except ValueError:
+            self.options_error_label.setText("运行参数必须填写为 0 到 1 之间的数字，请检查后重试。")
+            self.options_error_label.show()
+            return
+        alignment_mode = str(self.alignment_mode.currentData())
+        reference_sample = self.reference_sample.text().strip()
+        if alignment_mode == "fixed-reference" and not reference_sample:
+            self.options_error_label.setText("固定参考耳模式必须填写参考耳样本标签，例如 MQ_S001L。")
+            self.options_error_label.show()
+            return
+        self.options_error_label.hide()
         self.start_requested.emit(
             RunOptions(
-                max_salvage_unmapped_ratio=float(self.max_unmapped_ratio.text()),
-                max_salvage_degenerate_ratio=float(self.max_degenerate_ratio.text()),
-                pca_variance_threshold=float(self.pca_variance_threshold.text()),
-                reference_sample=self.reference_sample.text().strip() or None,
+                max_salvage_unmapped_ratio=max_unmapped_ratio,
+                max_salvage_degenerate_ratio=max_degenerate_ratio,
+                pca_variance_threshold=pca_variance_threshold,
+                reference_sample=reference_sample or None,
+                qc_figure_mode=str(self.qc_figure_mode.currentData()),
+                alignment_mode=alignment_mode,
+                parallel_workers=int(self.parallel_workers.currentData()),
             )
         )
 

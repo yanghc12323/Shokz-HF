@@ -119,9 +119,16 @@ class RunMonitor(QWidget):
 
     def poll_events(self) -> None:
         if self.controller.active_attempt is not None:
+            self.controller.refresh_control_status()
             self.controller.read_new_events()
 
     def _set_actions(self, status: RunStatus | None) -> None:
-        self.pause_button.setEnabled(status is RunStatus.RUNNING)
-        self.resume_button.setEnabled(status is RunStatus.PAUSED)
-        self.cancel_button.setEnabled(status in {RunStatus.RUNNING, RunStatus.PAUSE_REQUESTED, RunStatus.PAUSED})
+        supports_control = self.controller.supports_process_control
+        self.pause_button.setEnabled(supports_control and status is RunStatus.RUNNING)
+        self.resume_button.setEnabled(supports_control and status is RunStatus.PAUSED)
+        self.cancel_button.setEnabled(supports_control and status in {RunStatus.RUNNING, RunStatus.PAUSE_REQUESTED, RunStatus.PAUSED})
+        if not supports_control:
+            tip = "专家恢复脚本不支持安全暂停或取消。"
+            self.pause_button.setToolTip(tip)
+            self.resume_button.setToolTip(tip)
+            self.cancel_button.setToolTip(tip)

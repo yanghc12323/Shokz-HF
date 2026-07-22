@@ -44,6 +44,7 @@ def test_create_run_manifest_records_inputs_parameters_and_outputs(tmp_path: Pat
         max_salvage_unmapped_ratio=0.31,
         max_salvage_degenerate_ratio=0.012,
         pca_variance_threshold=0.8,
+        parallel_workers=0,
         **layout.pipeline_config_kwargs(),
     )
 
@@ -71,6 +72,8 @@ def test_create_run_manifest_records_inputs_parameters_and_outputs(tmp_path: Pat
     assert saved["parameters"]["max_salvage_unmapped_ratio"] == 0.31
     assert saved["parameters"]["max_salvage_degenerate_ratio"] == 0.012
     assert saved["parameters"]["pca_variance_threshold"] == 0.8
+    assert saved["parameters"]["parallel_workers_requested"] == 0
+    assert saved["parameters"]["parallel_workers_effective"] >= 1
     assert saved["parameters"]["raw_qc_policy"] == {
         "fail_unmapped_ratio": 0.2,
         "fail_on_any_degenerate_face": True,
@@ -128,6 +131,39 @@ def test_create_run_manifest_makes_legacy_outputs_project_relative_when_possible
     )
     assert manifest["outputs"]["raw_dir"] == str(
         (tmp_path / "outside_project" / "raw").resolve()
+    )
+
+
+def test_create_run_manifest_records_t_landmark_for_mq_mesh(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig
+    from ear_param.run_manifest import create_run_manifest
+
+    mesh_dir = tmp_path / "data" / "clean_mesh"
+    landmarks_dir = tmp_path / "data" / "landmarks"
+    config_dir = tmp_path / "config"
+    mesh_dir.mkdir(parents=True)
+    landmarks_dir.mkdir(parents=True)
+    config_dir.mkdir()
+    (mesh_dir / "MQ_S001L.ply").write_bytes(b"ply")
+    (landmarks_dir / "T001_L_landmarks.csv").write_text(
+        "landmark_id,x,y,z\nL7,0,0,0\n", encoding="utf-8"
+    )
+    regions = config_dir / "region_table.csv"
+    regions.write_text("region_id,resolution\nT001,24\n", encoding="utf-8")
+
+    manifest = create_run_manifest(
+        config=PipelineConfig(mesh_dir=mesh_dir, landmarks_dir=landmarks_dir, regions=regions),
+        run_dir=tmp_path / "run",
+        output_root=None,
+        project_root=tmp_path,
+        argv=[],
+    )
+
+    assert manifest["inputs"][0]["sample_tag"] == "MQ_S001L"
+    assert manifest["inputs"][0]["mesh"]["exists"] is True
+    assert manifest["inputs"][0]["landmarks"]["exists"] is True
+    assert manifest["inputs"][0]["landmarks"]["path"].endswith(
+        "data\\landmarks\\T001_L_landmarks.csv"
     )
 
 
@@ -222,6 +258,28 @@ def test_finish_manifest_records_completed_pipeline_summary(tmp_path: Path):
     assert saved["result"]["pca_result"]["explained_variance"] is None
     assert saved["result"]["pca_result"]["component_values"] == [3, None]
     assert json.loads(path.read_text(encoding="utf-8"))["result"]["pca_result"]["explained_variance"] is None
+
+
+def test_finish_manifest_records_timing_summary(tmp_path: Path):
+    from ear_param.pipeline import PipelineResult
+    from ear_param.run_manifest import finish_manifest, write_manifest
+
+    path = tmp_path / "manifest.json"
+    write_manifest(path, {"status": "RUNNING", "finished_at": None, "result": None, "error": ""})
+    result = PipelineResult(
+        records=pd.DataFrame(),
+        pca_status="SKIPPED",
+        pca_result={},
+        stage_timings=[
+            {"stage": "REMESH", "sample_tag": "T001_L", "elapsed_seconds": 1.25, "status": "PASS"},
+            {"stage": "WELD", "sample_tag": "", "elapsed_seconds": 0.75, "status": "PASS"},
+        ],
+    )
+
+    saved = finish_manifest(path, status="COMPLETED", result=result)
+
+    assert saved["result"]["timing_record_count"] == 2
+    assert saved["result"]["total_elapsed_seconds"] == 2.0
 
 
 def test_finish_manifest_records_top_level_error(tmp_path: Path):

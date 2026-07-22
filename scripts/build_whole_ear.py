@@ -50,7 +50,7 @@ def main() -> None:
             "weld_repaired when --enable_edge_repair is set."
         ),
     )
-    parser.add_argument("--samples", nargs="+", help="Optional sample tags, e.g. T013_L.")
+    parser.add_argument("--samples", nargs="+", help="Optional sample tags, e.g. MQ_S013L.")
     parser.add_argument("--weld_warning_mm", type=float, default=0.25)
     parser.add_argument("--weld_fail_mm", type=float, default=1.0)
     parser.add_argument("--mesh_dir", default="data/clean_mesh")

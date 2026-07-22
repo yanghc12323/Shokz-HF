@@ -35,7 +35,22 @@ class MeshViewer(QWidget):
         mesh = self._read_mesh(artifact.path)
         plotter = self._ensure_plotter()
         plotter.clear()
-        plotter.add_mesh(mesh, color="#91b8c6", smooth_shading=True, show_edges=False)
+        plotter.add_mesh(
+            mesh,
+            color="#6f9cab",
+            smooth_shading=True,
+            show_edges=False,
+            ambient=0.25,
+            diffuse=0.75,
+            specular=0.18,
+            specular_power=18,
+        )
+        plotter.add_text(
+            f"图层：{artifact.label}",
+            position="upper_left",
+            font_size=10,
+            color="#284955",
+        )
         self._mesh = mesh
         self.current_layer = LayerName(layer)
         self._region_actor = None
@@ -76,6 +91,8 @@ class MeshViewer(QWidget):
         else:
             factory = self._interactor_factory
         self.plotter = factory(self)
+        self.plotter.set_background("#eef4f6")
+        self.plotter.add_axes(line_width=1, labels_off=True)
         self._layout.replaceWidget(self.placeholder, self.plotter)
         self.placeholder.hide()
         return self.plotter

@@ -65,6 +65,20 @@ def test_pause_resume_cancel_write_atomic_control_status(tmp_path: Path):
     assert json.loads(controller.control_path.read_text(encoding="utf-8"))["status"] == "CANCEL_REQUESTED"
 
 
+def test_refresh_control_status_enables_resume_after_pipeline_acknowledges_pause(tmp_path: Path):
+    controller = RunController(process_factory=FakeProcess)
+    controller.start(_project(tmp_path), RunOptions())
+    controller.request_pause()
+    controller.control_path.write_text('{"status":"PAUSED"}', encoding="utf-8")
+
+    paused = controller.refresh_control_status()
+
+    assert paused.status is RunStatus.PAUSED
+    resumed = controller.resume()
+    assert resumed.status is RunStatus.RUNNING
+    assert json.loads(controller.control_path.read_text(encoding="utf-8"))["status"] == "RUNNING"
+
+
 def test_refresh_terminal_status_requires_manifest_and_maps_completed(tmp_path: Path):
     controller = RunController(process_factory=FakeProcess)
     attempt = controller.start(_project(tmp_path), RunOptions())
@@ -131,3 +145,21 @@ def test_start_recovery_runs_weld_from_parent_artifacts_only(tmp_path: Path):
     assert controller.active_attempt.status is RunStatus.FAILED
     assert manifest["status"] == "ERROR"
     assert manifest["recovery"]["parent_attempt"] == parent.attempt_id
+
+
+def test_recovery_attempt_does_not_advertise_pause_or_cancel_support(tmp_path: Path):
+    from desktop_app.models import AttemptRecord
+    from desktop_app.recovery_service import RecoveryOption
+
+    project = _project(tmp_path)
+    parent = AttemptRecord.create(project.root, "run-parent", "attempt-001")
+    (parent.artifacts_dir / "remesh_r24" / "salvaged").mkdir(parents=True)
+    (parent.artifacts_dir / "manifest.json").write_text(
+        '{"status":"ERROR","output_scope":"isolated","outputs":{"salvaged_dir":"remesh_r24/salvaged"}}',
+        encoding="utf-8",
+    )
+    controller = RunController(process_factory=FakeProcess)
+
+    controller.start_recovery(project, parent, RecoveryOption.WELD)
+
+    assert not controller.supports_process_control

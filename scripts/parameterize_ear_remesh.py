@@ -5,7 +5,7 @@
 Example for the current T001 test data:
   python scripts/parameterize_ear_remesh.py \
     --sample_id T001 --side L \
-    --mesh data/clean_mesh/T001_L.ply \
+    --mesh data/clean_mesh/MQ_S001L.ply \
     --landmarks data/landmarks/T001_L_landmarks.csv \
     --regions config/region_table.csv \
     --out_dir output/parameterized_points
@@ -84,7 +84,7 @@ def main() -> None:
 Example:
   python scripts/parameterize_ear_remesh.py \\
       --sample_id T001 --side L \\
-      --mesh data/clean_mesh/T001_L.ply \\
+      --mesh data/clean_mesh/MQ_S001L.ply \\
       --landmarks data/landmarks/T001_L_landmarks.csv \\
       --regions config/region_table.csv \\
       --out_dir output/parameterized_points

@@ -42,3 +42,22 @@ def test_left_sample_is_unchanged(tmp_path):
     assert result.mirrored is False
     np.testing.assert_allclose(result.mesh.vertices, mesh.vertices)
     np.testing.assert_array_equal(result.mesh.faces, mesh.faces)
+
+
+def test_mq_right_sample_is_mirrored(tmp_path):
+    from ear_param.canonicalization import canonicalize_sample
+
+    mesh = trimesh.Trimesh(
+        vertices=np.array([[1., 2., 3.], [4., 5., 6.], [7., 8., 9.]]),
+        faces=np.array([[0, 1, 2]]), process=False,
+    )
+    mesh_path = tmp_path / "MQ_S001R.ply"
+    mesh.export(mesh_path)
+    landmark_path = tmp_path / "T001_R_landmarks.csv"
+    pd.DataFrame({"landmark_id": ["L7"], "x": [1.], "y": [2.], "z": [3.]}).to_csv(landmark_path, index=False)
+
+    result = canonicalize_sample("MQ_S001R", mesh_path, landmark_path, tmp_path / "out")
+
+    assert result.source_side == "R"
+    assert result.mirrored is True
+    np.testing.assert_allclose(result.mesh.vertices[:, 0], [-1., -4., -7.])
