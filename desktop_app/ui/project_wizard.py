@@ -301,7 +301,7 @@ class ProjectWizard(QWidget):
         form.addRow(alignment_label, self.alignment_mode)
         form.addRow("", alignment_hint)
         self.reference_sample = QLineEdit()
-        self.reference_sample.setPlaceholderText("例如 MQ_S001L")
+        self.reference_sample.setPlaceholderText("例如 MQ_S068L（当前固定参考耳）")
         self.reference_sample.setToolTip("固定参考耳模式下必填；填写要作为参考耳的样本标签。该样本必须通过 Weld。")
         self.reference_sample.setEnabled(False)
         reference_label = QLabel("固定参考耳样本")

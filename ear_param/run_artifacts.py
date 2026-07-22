@@ -8,7 +8,7 @@ import re
 
 
 RESERVATION_MARKER = ".pipeline-reservation"
-_DEFAULT_REFERENCE_SAMPLE = "T076_L"
+_DEFAULT_REFERENCE_SAMPLE = "MQ_S068L"
 _REFERENCE_SAMPLE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*\Z")
 
 

@@ -60,8 +60,8 @@ def test_pipeline_output_layout_maps_every_stage_under_one_root(tmp_path: Path):
     assert layout.weld_dir == root / "whole_ear_r24" / "weld_repaired"
     assert layout.aligned_dir == root / "whole_ear_r24" / "aligned_gpa"
     assert layout.pca_dir == root / "pca_gpa_r24"
-    assert layout.reference_aligned_dir == root / "whole_ear_r24" / "aligned_reference_T076_L"
-    assert layout.reference_pca_dir == root / "pca_reference_T076_L_r24"
+    assert layout.reference_aligned_dir == root / "whole_ear_r24" / "aligned_reference_MQ_S068L"
+    assert layout.reference_pca_dir == root / "pca_reference_MQ_S068L_r24"
 
     config_paths = layout.pipeline_config_kwargs()
     assert set(config_paths) == {

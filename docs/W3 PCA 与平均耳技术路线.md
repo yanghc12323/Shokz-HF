@@ -131,10 +131,10 @@ tests/test_pca_average.py      # 输入契约与 PCA 回归测试
 python scripts/run_full_pipeline.py
 ```
 
-同时运行 GPA-PCA 与固定参考耳-PCA（示例参考样本为 `T076_L`）：
+当前正式全流程使用 `MQ_S068L` 作为固定参考耳：
 
 ```powershell
-python scripts/run_full_pipeline.py --reference-sample T076_L
+python scripts/run_full_pipeline.py --parallel-workers 4 --alignment-mode fixed-reference --reference-sample MQ_S068L
 ```
 
 ### 正式隔离全流程（桌面软件）
@@ -143,8 +143,10 @@ python scripts/run_full_pipeline.py --reference-sample T076_L
 
 ```powershell
 python scripts/run_full_pipeline.py `
-  --reference-sample T076_L `
-  --output-root output/pipeline_runs/full28_T076_20260715
+  --parallel-workers 4 `
+  --alignment-mode fixed-reference `
+  --reference-sample MQ_S068L `
+  --output-root output/pipeline_runs/mq_full_20260722
 ```
 
 该命令未另传 `--run_dir`，因此 `<output-root>` 包含所有 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
@@ -160,9 +162,9 @@ python scripts/run_full_pipeline.py `
   parameterized_points_r24/{raw,repaired,salvaged}/
   remesh_r24/{raw,repaired,salvaged}/
   remesh_qc_r24/
-  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_T076_L}/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S068L}/
   pca_gpa_r24/
-  pca_reference_T076_L_r24/
+  pca_reference_MQ_S068L_r24/
 ```
 
 固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；上面的 `T076_L` 是正式示例，未选择其他参考样本时仍使用该默认目录名。

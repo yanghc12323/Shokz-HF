@@ -66,8 +66,10 @@ pip install -r requirements.txt
 
 ```powershell
 python scripts/run_full_pipeline.py `
-  --reference-sample T076_L `
-  --output-root output/pipeline_runs/full28_T076_20260715
+  --parallel-workers 4 `
+  --alignment-mode fixed-reference `
+  --reference-sample MQ_S068L `
+  --output-root output/pipeline_runs/mq_full_20260722
 ```
 
 此命令没有额外传 `--run_dir`，因此 `<output-root>` 集中保存全部 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
@@ -83,12 +85,12 @@ python scripts/run_full_pipeline.py `
   parameterized_points_r24/{raw,repaired,salvaged}/
   remesh_r24/{raw,repaired,salvaged}/
   remesh_qc_r24/
-  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_T076_L}/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S068L}/
   pca_gpa_r24/
-  pca_reference_T076_L_r24/
+  pca_reference_MQ_S068L_r24/
 ```
 
-固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；上面的 `T076_L` 是正式示例，未选择其他参考样本时仍使用该默认目录名。
+固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；当前正式参考耳为 `MQ_S068L`，对应 `aligned_reference_MQ_S068L` 与 `pca_reference_MQ_S068L_r24`。
 
 不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向 W2、QC、Weld、对齐或 PCA 的阶段目录，旧命令和 `--run_dir` 语义保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和阶段产物都位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
 

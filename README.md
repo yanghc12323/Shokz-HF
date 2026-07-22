@@ -535,9 +535,11 @@ python scripts\run_full_pipeline.py `
   --landmarks_dir data\landmarks `
   --regions config\region_table.csv `
   --parallel-workers 4 `
+  --alignment-mode fixed-reference `
   --reference-sample MQ_S068L `
   --output-root output\runs\mq_full_20260722
 ```
 
 `--output-root` 必须是不存在或空目录。运行完成后，该目录包含 manifest、日志、QC、
-整耳、配准和 PCA 结果。
+整耳、配准和 PCA 结果。如需 GPA 路线，将 `--alignment-mode` 改为 `gpa`
+并移除 `--reference-sample` 即可。
