@@ -1,7 +1,7 @@
 ﻿# W2 Patch-Based Remesh 使用说明
 
 > 适用阶段：W2 真实样本 remesh、QC 与 region table 优化
-> 更新时间：2026-07-14
+> 更新时间：2026-07-22
 > 主入口：`scripts/parameterize_ear_remesh.py`
 > QC 可视化入口：`scripts/visualize_remesh_qc.py`
 
@@ -21,10 +21,10 @@ W2 的目标是将 landmark 定义的三角区域从原始 3D mesh 中提取出�
 
 ## 2. 当前有效样本
 
-当前主线以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的真实样本为准。目前已有 28 个原始 mesh/landmark 完整配对；应由正式批处理逐一完成 remesh、salvage、Weld 和对齐门禁。
+当前主线以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的真实样本为准。当前目录可发现 132 条 mesh/landmark 记录；应由正式批处理逐一完成 remesh、salvage、Weld 和对齐门禁，并以每次 manifest 中 `discovery=READY` 的条目作为实际纳入范围。
 
 ```text
-当前已完成 W2/Weld 的历史处理批次包含 12 个样本，其中 11 个 PCA-ready，`T049_L` 为 Weld FAIL。其余配对样本不应因文件已存在而被视为已通过 W2。
+历史处理批次包含 12 个旧数据样本，其中 11 个 PCA-ready，`T049_L` 为 Weld FAIL。该历史结果不代表当前 MQ 批次；文件存在也不表示已通过 W2。
 ```
 
 当前 `config/region_table.csv` 包含 15 个 region，字段为：
@@ -68,7 +68,7 @@ pip install -r requirements.txt
 python scripts/run_full_pipeline.py `
   --parallel-workers 4 `
   --alignment-mode fixed-reference `
-  --reference-sample MQ_S068L `
+  --reference-sample MQ_S076L `
   --output-root output/pipeline_runs/mq_full_20260722
 ```
 
@@ -85,16 +85,18 @@ python scripts/run_full_pipeline.py `
   parameterized_points_r24/{raw,repaired,salvaged}/
   remesh_r24/{raw,repaired,salvaged}/
   remesh_qc_r24/
-  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S068L}/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S076L}/
   pca_gpa_r24/
-  pca_reference_MQ_S068L_r24/
+  pca_reference_MQ_S076L_r24/
 ```
 
-固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；当前正式参考耳为 `MQ_S068L`，对应 `aligned_reference_MQ_S068L` 与 `pca_reference_MQ_S068L_r24`。
+固定参考耳目录名跟随实际的 `--reference-sample`，即 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；当前正式参考耳为 `MQ_S076L`，对应 `aligned_reference_MQ_S076L` 与 `pca_reference_MQ_S076L_r24`。
 
 不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向 W2、QC、Weld、对齐或 PCA 的阶段目录，旧命令和 `--run_dir` 语义保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和阶段产物都位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
 
 ## 4. 运行 Remesh
+
+> 历史开发命令：下列 `T###_L` 单样本与 QC 示例保留用于复现实验记录。当前 MQ 数据的正式批处理请使用上方“正式隔离全流程”，不要将这些旧样本标签或共享 `output/...` 目录用于新批次。
 
 单样本运行：
 

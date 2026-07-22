@@ -1,8 +1,8 @@
 ﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
 
 > 当前主线：论文式 patch-based remesh
-> 当前阶段：W2/W3 核心功能已完成；已完成 11 样本 GPA/T076 PCA 首轮对比，28 样本全流程验证待运行
-> 更新时间：2026-07-14
+> 当前阶段：MQ 命名输入、W2-W3 全流程、并行 Remesh/QC 与桌面软件已集成；固定参考耳为 `MQ_S076L`。
+> 更新时间：2026-07-22
 
 ## 1. 项目目标
 
@@ -23,7 +23,9 @@
 
 ## 2. 当前真实数据状态
 
-原始输入样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。目前已有 28 个完整配对样本：
+原始输入样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。当前目录可发现 132 条 mesh/landmark 记录；实际运行时以每次 `manifest.json` 中 `discovery=READY` 的条目为准。
+
+> 历史验证记录：下列 `T###_L` 是旧数据命名和早期 28 样本快照，仅用于保留当时的 QC/PCA 证据；当前正式输入以 `MQ_S###L/R` mesh 与对应 `T###_L/R_landmarks.csv` 的自动匹配为准。
 
 ```text
 T001_L, T002_L, T003_L, T004_L, T005_L, T006_L, T007_L,
@@ -94,6 +96,8 @@ matplotlib
 ```
 
 ## 5. 运行 W2 Remesh
+
+> 历史开发命令：本节至第 13 节中的 `T###_L` 单样本命令、QC 数字与旧输出路径用于保留早期验证过程。当前 MQ 数据的正式运行请使用第 16 节的全流程命令；不要把旧 T 标签或旧 `output/...` 目录作为新批次输入。
 
 ### 单样本运行
 
@@ -423,7 +427,7 @@ python scripts/run_full_pipeline.py --skip-remesh-qc
 如需同时保留固定参考耳坐标系下的独立 PCA 分支，指定一个已通过 Weld 的参考样本。该命令仍会运行 GPA-PCA；两条分支分别写入独立目录，绝不混合输入：
 
 ```powershell
-python scripts/run_full_pipeline.py --reference-sample T076_L
+python scripts/run_full_pipeline.py --reference-sample MQ_S076L
 ```
 
 ### 桌面软件的隔离运行
@@ -432,8 +436,10 @@ python scripts/run_full_pipeline.py --reference-sample T076_L
 
 ```powershell
 python scripts/run_full_pipeline.py `
-  --reference-sample T076_L `
-  --output-root output/pipeline_runs/full28_T076_20260715
+  --parallel-workers 4 `
+  --alignment-mode fixed-reference `
+  --reference-sample MQ_S076L `
+  --output-root output/runs/mq_full_20260722
 ```
 
 上面命令未另传 `--run_dir`，因此该 `output-root` 同时容纳所有 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
@@ -449,12 +455,12 @@ python scripts/run_full_pipeline.py `
   parameterized_points_r24/{raw,repaired,salvaged}/
   remesh_r24/{raw,repaired,salvaged}/
   remesh_qc_r24/
-  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_T076_L}/
+  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S076L}/
   pca_gpa_r24/
-  pca_reference_T076_L_r24/
+  pca_reference_MQ_S076L_r24/
 ```
 
-固定参考耳目录名跟随实际的 `--reference-sample`：隔离模式使用 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`。上面的 `T076_L` 是正式示例；未选择其他参考样本时，目录名仍以 `T076_L` 为默认形式。
+固定参考耳目录名跟随实际的 `--reference-sample`：隔离模式使用 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`。当前正式参考耳为 `MQ_S076L`，对应 `aligned_reference_MQ_S076L` 与 `pca_reference_MQ_S076L_r24`。
 
 不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向各阶段输出，旧命令与 `--run_dir` 工作流保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和全部阶段产物都必须位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
 
@@ -467,9 +473,9 @@ W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整�
 <output-root>/whole_ear_r24/aligned_gpa/<sample>_aligned_whole_ear_faces.csv
 <output-root>/whole_ear_r24/aligned_gpa/alignment_qc_summary.csv
 
-<output-root>/whole_ear_r24/aligned_reference_T076_L/<sample>_aligned_whole_ear_points.csv
-<output-root>/whole_ear_r24/aligned_reference_T076_L/<sample>_aligned_whole_ear_faces.csv
-<output-root>/whole_ear_r24/aligned_reference_T076_L/alignment_qc_summary.csv
+<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/<sample>_aligned_whole_ear_points.csv
+<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/<sample>_aligned_whole_ear_faces.csv
+<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/alignment_qc_summary.csv
 ```
 
 未传 `--output-root` 的 legacy CLI 模式才读取原有固定路径：
@@ -500,13 +506,13 @@ GPA 坐标系适用于群体 PCA 与平均耳；固定参考耳坐标系适用�
 python scripts/build_average_ear.py --aligned_dir <output-root>/whole_ear_r24/aligned_gpa --weld_dir <output-root>/whole_ear_r24/weld_repaired --out_dir <output-root>/pca_gpa_r24 --variance_threshold 0.75
 ```
 
-固定参考耳分支将上例的 `aligned_gpa` 与 `pca_gpa_r24` 分别替换为 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；正式 `T076_L` 示例对应 `aligned_reference_T076_L` 与 `pca_reference_T076_L_r24`。以下命令仅用于未传 `--output-root` 的 legacy CLI 模式：
+固定参考耳分支将上例的 `aligned_gpa` 与 `pca_gpa_r24` 分别替换为 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；当前 `MQ_S076L` 示例对应 `aligned_reference_MQ_S076L` 与 `pca_reference_MQ_S076L_r24`。以下命令仅用于未传 `--output-root` 的 legacy CLI 模式：
 
 ```powershell
 python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_weld_repaired --weld_dir output/whole_ear_r24/weld_repaired --out_dir output/w3_pca_r24 --variance_threshold 0.75
 ```
 
-本次首轮真实运行纳入 11 个样本，输出 4453 顶点、8640 面的平均耳 `output/w3_pca_r24/mean_whole_ear.ply`。前三个主成分累计解释 75.35% 的差异，因此按 75% 阈值保留 3 个主成分。样本量仍处于流程验证阶段，不应将当前模式解释为稳定总体模型。
+> 历史验证记录：本次首轮真实运行纳入 11 个旧数据集样本，输出 4453 顶点、8640 面的平均耳 `output/w3_pca_r24/mean_whole_ear.ply`。前三个主成分累计解释 75.35% 的差异，因此按 75% 阈值保留 3 个主成分。该结果用于流程验证，不代表当前 MQ 批次或稳定总体模型。
 
 W3 技术路线详见：
 
@@ -524,10 +530,10 @@ docs/W3 PCA 与平均耳技术路线.md
 4. `docs/W3 PCA 与平均耳技术路线.md`：记录 W3 输入契约、命令、输出和实际结果。
 
 不要让 README 停留在旧样本、旧 region table 或旧结论上。
-# CLI 全流程运行（新版 MQ 输入）
+## 16. CLI 全流程运行（新版 MQ 输入）
 
 在项目根目录运行。`--parallel-workers 0` 为自动并行（最多 4），也可明确指定
-`1`、`2` 或 `4`；固定参考耳使用 `MQ_S068L`。
+`1`、`2` 或 `4`；固定参考耳使用 `MQ_S076L`。
 
 ```powershell
 python scripts\run_full_pipeline.py `
@@ -536,7 +542,7 @@ python scripts\run_full_pipeline.py `
   --regions config\region_table.csv `
   --parallel-workers 4 `
   --alignment-mode fixed-reference `
-  --reference-sample MQ_S068L `
+  --reference-sample MQ_S076L `
   --output-root output\runs\mq_full_20260722
 ```
 
