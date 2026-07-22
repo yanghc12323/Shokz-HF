@@ -28,6 +28,18 @@ def _rotation_z(angle: float) -> np.ndarray:
     ])
 
 
+def test_landmark_path_prefers_canonical_mq_file_then_source_t_file(tmp_path: Path):
+    from scripts.align_whole_ear import _landmark_path
+
+    canonical = tmp_path / "MQ_S001L_landmarks.csv"
+    source = tmp_path / "T001_L_landmarks.csv"
+    source.write_text("landmark_id,x,y,z\n", encoding="utf-8")
+    assert _landmark_path(tmp_path, "MQ_S001L") == source
+
+    canonical.write_text("landmark_id,x,y,z\n", encoding="utf-8")
+    assert _landmark_path(tmp_path, "MQ_S001L") == canonical
+
+
 def test_rigid_kabsch_recovers_known_rotation_and_translation():
     from ear_param.alignment import apply_rigid_transform, rigid_kabsch
 
