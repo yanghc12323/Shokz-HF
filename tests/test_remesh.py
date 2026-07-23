@@ -104,6 +104,21 @@ def test_snap_landmarks_to_vertices_returns_nearest_vertex_ids(
     assert snapped["L10"].distance < 0.02
 
 
+def test_remesh_context_reuses_template_and_reverses_shared_path(
+    single_triangle_mesh, triangle_landmarks
+):
+    regions = [
+        {"region_id": "R1", "region_name": "one", "lm_a": "L10", "lm_b": "L20", "lm_c": "L30", "resolution": 2},
+        {"region_id": "R2", "region_name": "two", "lm_a": "L30", "lm_b": "L20", "lm_c": "L10", "resolution": 2},
+    ]
+    context = remesh.prepare_remesh_context(single_triangle_mesh, triangle_landmarks, regions)
+    first = build_region_remesh(single_triangle_mesh, triangle_landmarks, regions[0], context)
+    second = build_region_remesh(single_triangle_mesh, triangle_landmarks, regions[1], context)
+
+    assert first.template is second.template
+    assert first.boundary_paths.path_ab == list(reversed(second.boundary_paths.path_bc))
+
+
 def test_boundary_paths_follow_mesh_edges(single_triangle_mesh, triangle_landmarks):
     snapped = snap_landmarks_to_vertices(
         single_triangle_mesh, triangle_landmarks, ["L10", "L20", "L30"]

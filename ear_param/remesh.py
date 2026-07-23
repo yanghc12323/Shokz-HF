@@ -106,6 +106,16 @@ class SubdivisionTemplate:
     faces: np.ndarray
 
 
+@dataclass
+class RemeshContext:
+    """Immutable-per-sample inputs reused by every region remesh."""
+
+    adjacency: csr_matrix
+    snapped_landmarks: dict[str, SnappedLandmark]
+    path_cache: dict[tuple[int, int], list[int]]
+    templates: dict[int, SubdivisionTemplate]
+
+
 @dataclass(frozen=True)
 class LocatedSamples:
     """Location of UV sample points inside source UV faces."""
@@ -427,17 +437,23 @@ def build_region_remesh(
     mesh: trimesh.Trimesh,
     landmarks: pd.DataFrame,
     region: dict[str, object],
+    context: RemeshContext | None = None,
 ) -> RegionRemeshResult:
     """Run remesh stages 1-8 for a single triangular region."""
     lm_a = str(region["lm_a"])
     lm_b = str(region["lm_b"])
     lm_c = str(region["lm_c"])
-    snapped = snap_landmarks_to_vertices(mesh, landmarks, [lm_a, lm_b, lm_c])
-    adjacency = build_mesh_adjacency(mesh)
-    boundary_paths = build_triangle_boundary_paths(mesh, adjacency, snapped, lm_a, lm_b, lm_c)
+    if context is None:
+        snapped = snap_landmarks_to_vertices(mesh, landmarks, [lm_a, lm_b, lm_c])
+        adjacency = build_mesh_adjacency(mesh)
+        boundary_paths = build_triangle_boundary_paths(mesh, adjacency, snapped, lm_a, lm_b, lm_c)
+        template = make_subdivision_template(int(region["resolution"]))
+    else:
+        snapped = {key: context.snapped_landmarks[key] for key in (lm_a, lm_b, lm_c)}
+        boundary_paths = _cached_boundary_paths(context, snapped, lm_a, lm_b, lm_c)
+        template = context.templates[int(region["resolution"])]
     patch = extract_patch_faces(mesh, boundary_paths)
     parameterization = harmonic_parameterize_patch(mesh, patch, boundary_paths)
-    template = make_subdivision_template(int(region["resolution"]))
     located = locate_uv_samples_in_faces(
         parameterization.uv,
         parameterization.local_faces,
@@ -581,6 +597,45 @@ def build_mesh_adjacency(mesh: trimesh.Trimesh) -> csr_matrix:
 
     n_vertices = len(vertices)
     return csr_matrix((data, (rows, cols)), shape=(n_vertices, n_vertices))
+
+
+def prepare_remesh_context(
+    mesh: trimesh.Trimesh,
+    landmarks: pd.DataFrame,
+    regions: list[dict[str, object]],
+) -> RemeshContext:
+    """Prepare deterministic shared Remesh inputs once for one sample."""
+    landmark_ids = sorted({str(region[key]) for region in regions for key in ("lm_a", "lm_b", "lm_c")})
+    resolutions = {int(region["resolution"]) for region in regions}
+    return RemeshContext(
+        adjacency=build_mesh_adjacency(mesh),
+        snapped_landmarks=snap_landmarks_to_vertices(mesh, landmarks, landmark_ids),
+        path_cache={},
+        templates={resolution: make_subdivision_template(resolution) for resolution in resolutions},
+    )
+
+
+def _cached_boundary_paths(
+    context: RemeshContext,
+    snapped: dict[str, SnappedLandmark],
+    lm_a: str,
+    lm_b: str,
+    lm_c: str,
+) -> BoundaryPaths:
+    def path(start: int, end: int) -> list[int]:
+        key = (min(start, end), max(start, end))
+        stored = context.path_cache.get(key)
+        if stored is None:
+            stored = _shortest_vertex_path(context.adjacency, key[0], key[1])
+            context.path_cache[key] = stored
+        return stored if start == key[0] else list(reversed(stored))
+
+    return BoundaryPaths(
+        lm_a=lm_a, lm_b=lm_b, lm_c=lm_c,
+        path_ab=path(snapped[lm_a].vertex_id, snapped[lm_b].vertex_id),
+        path_bc=path(snapped[lm_b].vertex_id, snapped[lm_c].vertex_id),
+        path_ca=path(snapped[lm_c].vertex_id, snapped[lm_a].vertex_id),
+    )
 
 
 def build_triangle_boundary_paths(

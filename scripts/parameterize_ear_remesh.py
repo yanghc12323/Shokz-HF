@@ -31,6 +31,7 @@ from ear_param.remesh import (
     classify_remesh_qc_status,
     compute_region_feature_values,
     repair_unmapped_samples,
+    prepare_remesh_context,
 )
 
 
@@ -203,8 +204,9 @@ Example:
     salvaged_mesh_out_dir = Path(args.salvaged_mesh_out_dir) / sample_tag
     salvaged_mesh_out_dir.mkdir(parents=True, exist_ok=True)
 
-    for _, row in regions.iterrows():
-        region = row.to_dict()
+    regions_records = regions.to_dict("records")
+    context = prepare_remesh_context(mesh, landmarks, regions_records)
+    for region in regions_records:
         rid = str(region["region_id"])
         rname = str(region["region_name"])
         if event_writer:
@@ -213,7 +215,7 @@ Example:
         print(f"\n[Remesh] Processing region {rid} ({rname})...")
 
         try:
-            result = build_region_remesh(mesh, landmarks, region)
+            result = build_region_remesh(mesh, landmarks, region, context)
 
             region_start_id = global_point_id
             n_samples = len(result.sample_points_3d)
