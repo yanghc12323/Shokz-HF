@@ -9,6 +9,7 @@ from desktop_app.models import RunOptions
 from desktop_app.project_service import ProjectService
 from desktop_app.run_controller import RunController
 from desktop_app.ui.main_window import MainWindow
+from desktop_app.ui.run_monitor import region_reason_text
 from desktop_app.validation_service import ValidationService
 
 
@@ -40,6 +41,10 @@ def test_application_loads_bundled_chinese_font():
     app = create_application([])
 
     assert app.font().family() == "Noto Sans SC"
+
+
+def test_run_monitor_translates_r48_coverage_reason():
+    assert "覆盖" in region_reason_text("r48_unmapped")
 
 
 def test_new_project_page_browses_for_workspace_and_explains_fields(qtbot, monkeypatch, tmp_path: Path):
@@ -98,6 +103,8 @@ def test_run_options_have_visible_explanations(qtbot):
     editors = (
         window.wizard.max_unmapped_ratio,
         window.wizard.max_degenerate_ratio,
+        window.wizard.weld_warning_mm,
+        window.wizard.weld_fail_mm,
         window.wizard.pca_variance_threshold,
         window.wizard.reference_sample,
     )
@@ -110,6 +117,8 @@ def test_run_options_have_visible_explanations(qtbot):
     assert "#qcFigureMode { color: #37474f; background: #eef1f3;" in window.styleSheet()
     assert window.wizard.parallel_workers.currentData() == 0
     assert window.wizard.parallel_workers.count() == 4
+    assert window.wizard.weld_warning_mm.text() == "0.5"
+    assert window.wizard.weld_fail_mm.text() == "1.5"
 
 
 def test_fixed_reference_mode_requires_and_emits_a_reference_sample(qtbot):
@@ -169,6 +178,8 @@ def test_result_workbench_uses_dark_text_on_its_light_sidebar(qtbot):
     assert "#resultSampleSelector QAbstractItemView { color: #19242d;" in window.styleSheet()
     assert "#pcaScoresPanel, #viewerPanel { background: #ffffff;" in window.styleSheet()
     assert "#pcaScoresTitle, #viewerTitle { color: #17242f;" in window.styleSheet()
+    assert "#pcaMorphologyPage QTableWidget { color: #263843;" in window.styleSheet()
+    assert "#pcaMorphologyModelSelector { color: #19242d;" in window.styleSheet()
 
 
 def test_creating_project_moves_to_import_page(qtbot, tmp_path: Path):

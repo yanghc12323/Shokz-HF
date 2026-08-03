@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QToolButton,
@@ -27,6 +28,7 @@ from desktop_app.artifact_indexer import ArtifactIndex
 from desktop_app.models import ArtifactRef, LayerName
 from desktop_app.result_service import ResultService, SampleDetails
 from desktop_app.viewers.mesh_viewer import MeshViewer
+from desktop_app.ui.pca_morphology_page import PcaMorphologyPage
 
 
 _LAYER_LABELS = {
@@ -52,7 +54,12 @@ class ResultWorkbench(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
-        layout = QHBoxLayout(self)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        self.result_tabs = QTabWidget()
+        self.result_tabs.setObjectName("resultTabs")
+        review_page = QWidget()
+        layout = QHBoxLayout(review_page)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(16)
         self.result_scroll_area = QScrollArea()
@@ -153,6 +160,10 @@ class ResultWorkbench(QWidget):
         self.review_splitter.setStretchFactor(1, 6)
         self.review_splitter.setSizes([270, 380])
         layout.addWidget(self.review_splitter, 1)
+        self.pca_morphology_page = PcaMorphologyPage()
+        self.result_tabs.addTab(review_page, "结果复核")
+        self.result_tabs.addTab(self.pca_morphology_page, "PCA 形态分析")
+        root_layout.addWidget(self.result_tabs)
         self._set_layer_availability({})
 
     def set_attempt(self, index: ArtifactIndex) -> None:
@@ -172,6 +183,7 @@ class ResultWorkbench(QWidget):
         else:
             self.status_label.setText("该运行没有可复核的样本记录。")
             self._set_layer_availability({})
+        self.pca_morphology_page.set_attempt(index)
 
     def open_output_folder(self) -> bool:
         """Open the isolated output root after the user has reviewed the model."""

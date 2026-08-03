@@ -35,6 +35,7 @@ class LayerName(StrEnum):
     SALVAGED = "SALVAGED"
     WHOLE_EAR = "WHOLE_EAR"
     AVERAGE_EAR = "AVERAGE_EAR"
+    PCA_MORPHOLOGY = "PCA_MORPHOLOGY"
 
 
 @dataclass(frozen=True)
@@ -99,13 +100,15 @@ class AttemptRecord:
 class RunOptions:
     sample_tags: tuple[str, ...] = ()
     skip_remesh_qc: bool = False
-    max_salvage_unmapped_ratio: float = 0.35
-    max_salvage_degenerate_ratio: float = 0.015
+    max_salvage_unmapped_ratio: float = 0.45
+    max_salvage_degenerate_ratio: float = 0.03
     pca_variance_threshold: float = 0.75
     reference_sample: str | None = None
     qc_figure_mode: str = "all"
     alignment_mode: str = "gpa"
     parallel_workers: int = 0
+    weld_warning_mm: float = 0.5
+    weld_fail_mm: float = 1.5
 
 
 @dataclass(frozen=True)

@@ -254,6 +254,20 @@ class MainWindow(QMainWindow):
             #pcaScoresPanel QTableWidget { color: #263843; background: #fbfcfd; alternate-background-color: #f2f6f7; border: 1px solid #d4e0e4; gridline-color: #e1e9ec; }
             #pcaScoresPanel QHeaderView::section { color: #365260; background: #e9f0f2; border: 0; border-bottom: 1px solid #cddce1; padding: 5px; font-weight: 600; }
             #resultReviewSplitter::handle { background: #dce5e9; height: 7px; margin: 5px 0; border-radius: 3px; }
+            #resultTabs::pane { border: 0; background: #f3f6f8; }
+            #resultTabs QTabBar::tab { color: #52646e; background: #e7edf0; border: 1px solid #d1dce1; border-bottom: 0; padding: 9px 18px; margin-right: 3px; }
+            #resultTabs QTabBar::tab:selected { color: #17242f; background: #ffffff; font-weight: 700; }
+            #pcaMorphologyPage { background: #f3f6f8; color: #19242d; }
+            #pcaMorphologySidebar, #pcaMorphologyFigurePanel, #pcaMorphologyViewerPanel { background: #ffffff; color: #19242d; border: 1px solid #d9e2e7; border-radius: 7px; }
+            #pcaMorphologyTitle { color: #17242f; font-size: 22px; font-weight: 700; }
+            #pcaMorphologyCaption, #pcaMorphologyStatus { color: #657782; font-size: 12px; }
+            #pcaMorphologyChoice { color: #2e5968; background: #edf4f5; border-radius: 4px; padding: 7px; font-weight: 600; }
+            #pcaMorphologySectionTitle, #pcaMorphologyPanelTitle { color: #17242f; font-size: 15px; font-weight: 700; padding-top: 5px; }
+            #pcaMorphologyFigure { color: #657782; background: #fbfcfd; border: 1px solid #d4e0e4; border-radius: 4px; }
+            #pcaMorphologyPage QTableWidget { color: #263843; background: #fbfcfd; alternate-background-color: #f2f6f7; border: 1px solid #d4e0e4; gridline-color: #e1e9ec; }
+            #pcaMorphologyPage QHeaderView::section { color: #365260; background: #e9f0f2; border: 0; border-bottom: 1px solid #cddce1; padding: 5px; font-weight: 600; }
+            #pcaMorphologyModelSelector { color: #19242d; background: #fbfcfd; border: 1px solid #cfdbe1; border-radius: 4px; padding: 6px; }
+            #pcaMorphologyModelSelector QAbstractItemView { color: #19242d; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
             #qcFigureMode { color: #37474f; background: #eef1f3; border: 1px solid #c6d0d6; border-radius: 4px; padding: 7px; }
             #qcFigureMode QAbstractItemView { color: #37474f; background: #ffffff; selection-color: #19242d; selection-background-color: #dce8ec; }
             #alignmentMode { color: #37474f; background: #eef1f3; border: 1px solid #c6d0d6; border-radius: 4px; padding: 7px; }

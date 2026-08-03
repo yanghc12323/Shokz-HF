@@ -26,6 +26,16 @@ class ArtifactIndex:
     alignment_summary: pd.DataFrame
     pca_input_manifest: pd.DataFrame
     pca_scores: pd.DataFrame
+    pca_morphology_dir: Path | None
+    pca_morphology_summary: pd.DataFrame
+    pc_extreme_shapes: pd.DataFrame
+    observed_pc_extremes: pd.DataFrame
+    multivariate_extremes: pd.DataFrame
+    cluster_k_selection: pd.DataFrame
+    cluster_assignments: pd.DataFrame
+    cluster_summary: pd.DataFrame
+    pc1_pc2_clusters_figure: Path | None
+    pc_variance_scree_figure: Path | None
     evidence: tuple[ArtifactRef, ...]
 
 
@@ -49,8 +59,10 @@ class ArtifactIndexer:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ArtifactIntegrityError(f"无法读取运行清单: {manifest_path}") from exc
-        if str(manifest.get("status", "")).upper() != "COMPLETED":
-            raise ArtifactIntegrityError("仅可复核状态为 COMPLETED 的运行结果")
+        if str(manifest.get("status", "")).upper() not in {
+            "COMPLETED", "COMPLETED_WITH_SAMPLE_ERRORS",
+        }:
+            raise ArtifactIntegrityError("仅可复核已完成且存在有效结果的运行")
         if manifest.get("output_scope") != "isolated":
             raise ArtifactIntegrityError("结果清单不是隔离输出，拒绝加载")
 
@@ -78,11 +90,39 @@ class ArtifactIndexer:
         pca_input_manifest = self._read_csv(pca_path)
         pca_scores_path = self._declared_file(selected_pca_dir, "scores.csv")
         pca_scores = self._read_csv(pca_scores_path)
+        pca_morphology_dir = self._optional_child_dir(selected_pca_dir, "pca_morphology")
+        pca_morphology_summary = self._optional_csv(
+            pca_morphology_dir, "pca_morphology_summary.csv"
+        )
+        pc_extreme_shapes = self._optional_csv(pca_morphology_dir, "pc_extreme_shapes.csv")
+        observed_pc_extremes = self._optional_csv(
+            pca_morphology_dir, "observed_pc_extremes.csv"
+        )
+        multivariate_extremes = self._optional_csv(
+            pca_morphology_dir, "multivariate_extreme_individuals.csv"
+        )
+        cluster_k_selection = self._optional_csv(
+            pca_morphology_dir, "cluster_k_selection.csv"
+        )
+        cluster_assignments = self._optional_csv(
+            pca_morphology_dir, "cluster_assignments.csv"
+        )
+        cluster_summary = self._optional_csv(pca_morphology_dir, "cluster_summary.csv")
+        pc1_pc2_clusters_figure = self._optional_file(
+            pca_morphology_dir, "figures/pc1_pc2_clusters.png"
+        )
+        pc_variance_scree_figure = self._optional_file(
+            pca_morphology_dir, "figures/pc_variance_scree.png"
+        )
         evidence.extend(weld_refs)
         for label, path in (
             ("对齐 QC", alignment_path),
             ("PCA 输入清单", pca_path),
             ("PCA Score", pca_scores_path),
+            ("PCA 形态汇总", self._declared_file(pca_morphology_dir, "pca_morphology_summary.csv")),
+            ("聚类分配", self._declared_file(pca_morphology_dir, "cluster_assignments.csv")),
+            ("PC1-PC2 聚类图", pc1_pc2_clusters_figure),
+            ("PCA 方差图", pc_variance_scree_figure),
         ):
             if path is not None and path.is_file():
                 evidence.append(ArtifactRef(label, path))
@@ -97,6 +137,16 @@ class ArtifactIndexer:
             alignment_summary=alignment_summary,
             pca_input_manifest=pca_input_manifest,
             pca_scores=pca_scores,
+            pca_morphology_dir=pca_morphology_dir,
+            pca_morphology_summary=pca_morphology_summary,
+            pc_extreme_shapes=pc_extreme_shapes,
+            observed_pc_extremes=observed_pc_extremes,
+            multivariate_extremes=multivariate_extremes,
+            cluster_k_selection=cluster_k_selection,
+            cluster_assignments=cluster_assignments,
+            cluster_summary=cluster_summary,
+            pc1_pc2_clusters_figure=pc1_pc2_clusters_figure,
+            pc_variance_scree_figure=pc_variance_scree_figure,
             evidence=tuple(evidence),
         )
 
@@ -112,6 +162,20 @@ class ArtifactIndexer:
     @staticmethod
     def _declared_file(directory: Path | None, name: str) -> Path | None:
         return None if directory is None else directory / name
+
+    @staticmethod
+    def _optional_child_dir(parent: Path | None, name: str) -> Path | None:
+        candidate = None if parent is None else parent / name
+        return candidate if candidate is not None and candidate.is_dir() else None
+
+    @staticmethod
+    def _optional_file(directory: Path | None, relative_name: str) -> Path | None:
+        candidate = None if directory is None else directory / relative_name
+        return candidate if candidate is not None and candidate.is_file() else None
+
+    @staticmethod
+    def _optional_csv(directory: Path | None, name: str) -> pd.DataFrame:
+        return ArtifactIndexer._read_csv(None if directory is None else directory / name)
 
     @staticmethod
     def _sample_qc_tables(

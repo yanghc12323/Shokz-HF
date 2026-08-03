@@ -95,6 +95,16 @@ def test_result_workbench_places_scores_above_viewer_outside_left_sidebar(qtbot)
     assert workbench.pca_scores_table not in workbench.result_sidebar.findChildren(type(workbench.pca_scores_table))
 
 
+def test_result_workbench_places_pca_morphology_in_a_separate_tab(qtbot):
+    workbench = ResultWorkbench()
+    qtbot.addWidget(workbench)
+
+    assert workbench.result_tabs.count() == 2
+    assert workbench.result_tabs.tabText(0) == "结果复核"
+    assert workbench.result_tabs.tabText(1) == "PCA 形态分析"
+    assert workbench.result_tabs.widget(1) is workbench.pca_morphology_page
+
+
 def test_result_workbench_opens_current_attempt_output_folder(qtbot, tmp_path: Path, monkeypatch):
     workbench = ResultWorkbench()
     qtbot.addWidget(workbench)
