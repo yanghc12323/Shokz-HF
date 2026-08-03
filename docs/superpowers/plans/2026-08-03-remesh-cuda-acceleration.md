@@ -46,12 +46,12 @@ def test_remesh_context_reuses_one_dijkstra_tree_for_multiple_paths(monkeypatch,
         return original(graph, directed=directed, indices=indices, return_predecessors=return_predecessors)
     monkeypatch.setattr(remesh, "dijkstra", tracked)
     regions = [
-        {"region_id": "R1", "region_name": "one", "lm_a": "A", "lm_b": "B", "lm_c": "C", "resolution": 2},
-        {"region_id": "R2", "region_name": "two", "lm_a": "A", "lm_b": "C", "lm_c": "B", "resolution": 2},
+        {"region_id": "R1", "region_name": "one", "lm_a": "L10", "lm_b": "L20", "lm_c": "L30", "resolution": 2},
+        {"region_id": "R2", "region_name": "two", "lm_a": "L10", "lm_b": "L30", "lm_c": "L20", "resolution": 2},
     ]
     context = remesh.prepare_remesh_context(center_patch_mesh, triangle_landmarks, regions)
     [remesh.build_region_remesh(center_patch_mesh, triangle_landmarks, item, context) for item in regions]
-    assert calls.count(context.snapped_landmarks["A"].vertex_id) == 1
+    assert calls.count(context.snapped_landmarks["L10"].vertex_id) == 1
 ```
 
 - [ ] **Step 2: 确认红灯**
