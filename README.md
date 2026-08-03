@@ -374,6 +374,7 @@ T066_L、T094_L 和 T097_L 的 baseline WARNING 已在独立 `weld_repaired` 层
 | `ear_param/alignment.py` | 刚体 Kabsch、GPA 与固定参考耳对齐 |
 | `scripts/align_whole_ear.py` | GPA 或固定参考耳的整耳坐标统一与对齐 QC 入口 |
 | `ear_param/pca_average.py` | W3 输入门禁、PCA、平均耳与模式网格导出 |
+| `ear_param/pca_morphology.py` | PCA 后处理：极值形态、真实极值被试、自动聚类、极端个体与图形产物 |
 | `scripts/build_average_ear.py` | W3 PCA 与平均耳命令行入口 |
 | `docs/W2 Remesh 使用说明.md` | W2 使用说明 |
 | `docs/整耳全局模板、边界焊接与刚体统一坐标系.md` | 整耳焊接与坐标统一说明 |
@@ -513,6 +514,34 @@ python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_w
 ```
 
 > 历史验证记录：本次首轮真实运行纳入 11 个旧数据集样本，输出 4453 顶点、8640 面的平均耳 `output/w3_pca_r24/mean_whole_ear.ply`。前三个主成分累计解释 75.35% 的差异，因此按 75% 阈值保留 3 个主成分。该结果用于流程验证，不代表当前 MQ 批次或稳定总体模型。
+
+### PCA 形态极值、自动聚类与极端个体
+
+从当前版本开始，`scripts/build_average_ear.py` 和全流程中的 PCA 阶段会在原 PCA 输出根目录下额外生成 `pca_morphology/`。原有命令行参数不变，且该目录只是 PCA 成功后的描述性后处理：它不会修改 Remesh、Salvage、Weld、对齐、PCA 纳入、平均耳、`scores.csv` 或任何样本的 PASS/FAIL 状态。
+
+```text
+<pca-output>/pca_morphology/
+  pca_morphology_summary.csv
+  pc_extreme_shapes.csv
+  observed_pc_extremes.csv
+  multivariate_extreme_individuals.csv
+  cluster_k_selection.csv
+  cluster_assignments.csv
+  cluster_summary.csv
+  cluster_means/Cluster_01_mean.ply
+  figures/pc1_pc2_clusters.png
+  figures/pc_variance_scree.png
+```
+
+结果的解释原则：
+
+1. `pc_modes/PC01_plus_2sd.ply`、`PC01_minus_2sd.ply`、`PC02_plus_2sd.ply`、`PC02_minus_2sd.ply` 是平均耳沿主成分的**理论形态**，不是某一个真实受试者。只要 PC02 存在，即使 75% 方差阈值只保留 PC01，也会输出 PC02 的展示模型。
+2. `observed_pc_extremes.csv` 是 PCA score 中 `PC01+/PC01-/PC02+/PC02-` 四个方向对应的**真实被试**；同一被试可占据多个方向。若有完全并列，按 `sample_tag` 字典序选主记录，并同时写出全部并列样本。
+3. 聚类使用达到当前 PCA 方差阈值（默认 75%）的全部 score，逐列 Z-score 后进行 Ward 层次聚类。系统在 `K=2` 到 `min(6, 样本数-1)` 中选择平均 silhouette score 最高的 K；`cluster_k_selection.csv` 保留所有候选 K 的依据。少于 4 个 PCA 纳入样本时跳过聚类，但 PCA 本身仍成功。
+4. `multivariate_extreme_individuals.csv` 根据标准化保留 PC score 到总体中心的距离排序，将最高 5% 标为“候选极端形态个体”。这仅表示应优先人工复核，绝不是质量失败、临床诊断或自动剔除条件。
+5. `pc1_pc2_clusters.png` 显示真实样本的 PC1–PC2 散点、聚类颜色与四个真实方向极值；`pc_variance_scree.png` 显示单个及累计解释方差。桌面软件在“结果复核 → PCA 形态分析”标签中可查看这些图、表格、理论形态、聚类平均耳和真实极端被试。
+
+`+PC` 与 `-PC` 仅表示本次 PCA 运行的正负 score 方向，不能在不核对三维模型的前提下直接赋予“更大/更小”“更宽/更窄”等固定解剖含义，也不应跨不同批次 PCA 直接比较其正负号。
 
 W3 技术路线详见：
 

@@ -51,6 +51,10 @@ def analyze_pca_morphology(
     points = inputs.points[order]
     retained_names, retained_scores = _retained_scores(result, order)
     standardized_scores, active_names = _standardize_scores(retained_scores, retained_names)
+    directional_names, directional_scores = _directional_scores(result, order)
+    directional_standardized_scores, directional_active_names = _standardize_scores(
+        directional_scores, directional_names
+    )
 
     cluster_selection, assignments, cluster_summary, cluster_mean_points, cluster_status, selected_count = (
         _cluster_samples(
@@ -62,12 +66,18 @@ def analyze_pca_morphology(
             points,
         )
     )
+    assignments = _add_display_scores(
+        assignments,
+        sample_tags,
+        directional_scores,
+        directional_names,
+    )
     observed_extremes = _directional_extremes(
         sample_tags,
-        retained_scores,
-        retained_names,
-        standardized_scores,
-        active_names,
+        directional_scores,
+        directional_names,
+        directional_standardized_scores,
+        directional_active_names,
         assignments,
     )
     multivariate_extremes = _multivariate_extremes(
@@ -251,6 +261,28 @@ def _retained_scores(result: PcaResult, order: np.ndarray) -> tuple[list[str], n
     count = min(int(result.n_components_75), len(result.components))
     names = [f"PC{index:02d}" for index in range(1, count + 1)]
     return names, np.asarray(result.scores[order, :count], dtype=float)
+
+
+def _directional_scores(result: PcaResult, order: np.ndarray) -> tuple[list[str], np.ndarray]:
+    count = min(2, len(result.components))
+    names = [f"PC{index:02d}" for index in range(1, count + 1)]
+    return names, np.asarray(result.scores[order, :count], dtype=float)
+
+
+def _add_display_scores(
+    assignments: pd.DataFrame,
+    sample_tags: tuple[str, ...],
+    scores: np.ndarray,
+    names: list[str],
+) -> pd.DataFrame:
+    if assignments.empty:
+        return assignments
+    display = pd.DataFrame({"sample_tag": sample_tags})
+    for index, name in enumerate(names):
+        display[name] = scores[:, index]
+    return assignments.drop(columns=names, errors="ignore").merge(
+        display, on="sample_tag", how="left", validate="one_to_one"
+    )
 
 
 def _standardize_scores(scores: np.ndarray, names: list[str]) -> tuple[np.ndarray, list[str]]:

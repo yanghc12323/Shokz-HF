@@ -199,6 +199,31 @@ def test_write_pca_outputs_writes_pc02_modes_even_when_threshold_retains_only_pc
     assert (tmp_path / "pca" / "pc_modes" / "PC02_minus_2sd.ply").is_file()
 
 
+def test_analysis_keeps_pc02_real_extremes_when_cluster_threshold_retains_only_pc01(tmp_path: Path):
+    from ear_param.pca_morphology import analyze_pca_morphology
+
+    inputs, result = _inputs_and_result(np.array([
+        [-3.0, -1.0],
+        [0.0, 0.0],
+        [3.0, 1.0],
+    ]))
+    result = replace(result, n_components_75=1)
+
+    analysis = analyze_pca_morphology(
+        inputs,
+        result,
+        variance_threshold=0.75,
+        aligned_dir=tmp_path / "aligned",
+    )
+
+    pc02 = analysis.observed_pc_extremes.loc[
+        analysis.observed_pc_extremes["component"] == "PC02"
+    ]
+    assert set(pc02["status"]) == {"available"}
+    assert set(pc02["sample_tag"]) == {"S001_L", "S003_L"}
+    assert analysis.summary.loc[0, "feature_components"] == "PC01"
+
+
 def test_build_average_ear_cli_writes_pca_morphology_outputs(tmp_path: Path):
     aligned_dir = tmp_path / "aligned"
     weld_dir = tmp_path / "weld"

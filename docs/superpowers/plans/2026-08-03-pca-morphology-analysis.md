@@ -8,6 +8,8 @@
 
 **Tech Stack:** Python 3.11、NumPy、Pandas、SciPy（Ward 层次聚类）、Matplotlib（Agg 后端）、Trimesh、PySide6、PyVista、pytest、pytest-qt。
 
+**Execution status:** 已于 2026-08-03 完成。核心计算、CLI 产物、桌面端独立标签页、README 与主项目回归测试均已完成；完整仓库 `pytest` 另包含未安装的独立 `modules/ear-coordinate-transform` 子项目，因此该两项模块测试需在其独立环境中运行。
+
 ## Global Constraints
 
 - 新增分析只消费已通过 Weld + 对齐门禁、已纳入 PCA 的数据；不得改变 Remesh、Salvage、Weld、配准、PCA 输入纳入或失败状态。
