@@ -11,6 +11,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from ear_param.pca_average import fit_pca, load_pca_inputs, write_pca_outputs
+from ear_param.pca_morphology import analyze_pca_morphology, write_pca_morphology_outputs
 
 
 def main() -> None:
@@ -35,6 +36,18 @@ def main() -> None:
         Path(args.out_dir),
         variance_threshold=args.variance_threshold,
     )
+    morphology = analyze_pca_morphology(
+        inputs,
+        result,
+        variance_threshold=args.variance_threshold,
+        aligned_dir=Path(args.aligned_dir),
+    )
+    morphology_dir = write_pca_morphology_outputs(
+        inputs,
+        result,
+        morphology,
+        out_dir=Path(args.out_dir),
+    )
     cumulative = result.cumulative_explained_variance_ratio[result.n_components_75 - 1]
     excluded = int((~inputs.manifest["included"]).sum())
     print("[W3 PCA] Included samples:", " ".join(inputs.sample_tags))
@@ -45,6 +58,8 @@ def main() -> None:
         f"(cumulative {cumulative:.2%})."
     )
     print(f"[W3 PCA] Output: {Path(args.out_dir)}")
+    print(f"[W3 PCA] Morphology analysis: {morphology.summary.loc[0, 'status']}")
+    print(f"[W3 PCA] Morphology output: {morphology_dir}")
 
 
 if __name__ == "__main__":

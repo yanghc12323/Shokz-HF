@@ -210,7 +210,11 @@ def write_pca_outputs(
 
     mode_dir = out_dir / "pc_modes"
     mode_dir.mkdir(exist_ok=True)
-    for component_index in range(result.n_components_75):
+    mode_count = min(
+        len(result.components),
+        max(result.n_components_75, 2),
+    )
+    for component_index in range(mode_count):
         displacement = result.components[component_index].reshape(result.mean_points.shape)
         scale = 2.0 * np.sqrt(result.explained_variance[component_index])
         mode_name = f"PC{component_index + 1:02d}"

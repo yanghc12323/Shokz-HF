@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+import subprocess
+import sys
 
 import numpy as np
 import pandas as pd
@@ -17,6 +20,7 @@ BASE_POINTS = np.array([
     [1.0, 1.0, 0.0],
     [0.0, 1.0, 0.0],
 ])
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _inputs_and_result(
@@ -135,3 +139,117 @@ def test_analysis_uses_sample_tag_order_to_break_directional_extreme_ties(tmp_pa
     assert pc01_plus["sample_tag"] == "S001_L"
     assert pc01_plus["tie_count"] == 2
     assert pc01_plus["tied_sample_tags"] == "S001_L;S002_L"
+
+
+def test_write_outputs_creates_auditable_tables_cluster_means_and_figures(tmp_path: Path):
+    from ear_param.pca_morphology import (
+        analyze_pca_morphology,
+        write_pca_morphology_outputs,
+    )
+
+    inputs, result = _inputs_and_result(np.array([
+        [-5.0, -6.0],
+        [-4.0, -4.0],
+        [-3.0, -3.0],
+        [-2.0, -2.0],
+        [2.0, 2.0],
+        [3.0, 3.0],
+        [4.0, 4.0],
+        [5.0, 6.0],
+    ]))
+    out_dir = tmp_path / "pca"
+    analysis = analyze_pca_morphology(
+        inputs,
+        result,
+        variance_threshold=0.75,
+        aligned_dir=tmp_path / "aligned",
+    )
+
+    morphology_dir = write_pca_morphology_outputs(inputs, result, analysis, out_dir=out_dir)
+
+    for name in (
+        "pca_morphology_summary.csv",
+        "pc_extreme_shapes.csv",
+        "observed_pc_extremes.csv",
+        "multivariate_extreme_individuals.csv",
+        "cluster_k_selection.csv",
+        "cluster_assignments.csv",
+        "cluster_summary.csv",
+    ):
+        assert (morphology_dir / name).is_file()
+    assert (morphology_dir / "cluster_means" / "Cluster_01_mean.ply").is_file()
+    assert (morphology_dir / "figures" / "pc1_pc2_clusters.png").is_file()
+    assert (morphology_dir / "figures" / "pc_variance_scree.png").is_file()
+
+
+def test_write_pca_outputs_writes_pc02_modes_even_when_threshold_retains_only_pc01(tmp_path: Path):
+    from ear_param.pca_average import write_pca_outputs
+
+    inputs, result = _inputs_and_result(np.array([
+        [-2.0, -1.0],
+        [0.0, 0.0],
+        [2.0, 1.0],
+    ]))
+    result = replace(result, n_components_75=1)
+
+    write_pca_outputs(inputs, result, tmp_path / "pca", variance_threshold=0.75)
+
+    assert (tmp_path / "pca" / "pc_modes" / "PC01_plus_2sd.ply").is_file()
+    assert (tmp_path / "pca" / "pc_modes" / "PC02_plus_2sd.ply").is_file()
+    assert (tmp_path / "pca" / "pc_modes" / "PC02_minus_2sd.ply").is_file()
+
+
+def test_build_average_ear_cli_writes_pca_morphology_outputs(tmp_path: Path):
+    aligned_dir = tmp_path / "aligned"
+    weld_dir = tmp_path / "weld"
+    output_dir = tmp_path / "pca"
+    aligned_dir.mkdir()
+    weld_dir.mkdir()
+    alignment_rows = []
+    for index, sample_tag in enumerate(("S001_L", "S002_L", "S003_L", "S004_L")):
+        points = BASE_POINTS.copy()
+        points[:, 0] += (-2.0, -1.0, 1.0, 2.0)[index]
+        points[:, 1] += (-1.0, 1.0, -1.0, 1.0)[index]
+        pd.DataFrame({
+            "global_vertex_id": np.arange(len(points)),
+            "x": points[:, 0],
+            "y": points[:, 1],
+            "z": points[:, 2],
+        }).to_csv(aligned_dir / f"{sample_tag}_aligned_whole_ear_points.csv", index=False)
+        pd.DataFrame({
+            "global_face_id": np.arange(len(FACES)),
+            "global_v0": FACES[:, 0],
+            "global_v1": FACES[:, 1],
+            "global_v2": FACES[:, 2],
+        }).to_csv(aligned_dir / f"{sample_tag}_aligned_whole_ear_faces.csv", index=False)
+        pd.DataFrame([{
+            "sample_tag": sample_tag,
+            "status": "PASS",
+            "pca_ready": True,
+            "input_layer": "weld_repaired",
+        }]).to_csv(weld_dir / f"{sample_tag}_weld_qc_summary.csv", index=False)
+        alignment_rows.append({
+            "sample_tag": sample_tag,
+            "status": "PASS",
+            "input_layer": "weld_repaired",
+        })
+    pd.DataFrame(alignment_rows).to_csv(aligned_dir / "alignment_qc_summary.csv", index=False)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_average_ear.py",
+            "--aligned_dir", str(aligned_dir),
+            "--weld_dir", str(weld_dir),
+            "--out_dir", str(output_dir),
+            "--variance_threshold", "0.75",
+        ],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "[W3 PCA] Morphology analysis: PASS" in completed.stdout
+    assert (output_dir / "pca_morphology" / "pca_morphology_summary.csv").is_file()

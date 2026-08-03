@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist, squareform
+import trimesh
 
 from ear_param.pca_average import PcaInput, PcaResult
 
@@ -97,6 +99,152 @@ def analyze_pca_morphology(
         cluster_mean_points=cluster_mean_points,
         aligned_dir=Path(aligned_dir),
     )
+
+
+def write_pca_morphology_outputs(
+    inputs: PcaInput,
+    result: PcaResult,
+    analysis: PcaMorphologyAnalysis,
+    *,
+    out_dir: Path,
+) -> Path:
+    """Write auditable PCA morphology tables, cluster means, and overview figures."""
+    out_dir = Path(out_dir)
+    morphology_dir = out_dir / "pca_morphology"
+    cluster_dir = morphology_dir / "cluster_means"
+    figures_dir = morphology_dir / "figures"
+    cluster_dir.mkdir(parents=True, exist_ok=True)
+    figures_dir.mkdir(parents=True, exist_ok=True)
+
+    observed_extremes = analysis.observed_pc_extremes.copy()
+    observed_extremes["aligned_mesh_path"] = observed_extremes["sample_tag"].map(
+        lambda sample_tag: _aligned_mesh_relative_path(
+            str(sample_tag), analysis.aligned_dir, out_dir
+        ) if str(sample_tag) else ""
+    )
+    analysis.summary.to_csv(morphology_dir / "pca_morphology_summary.csv", index=False)
+    analysis.pc_extreme_shapes.to_csv(morphology_dir / "pc_extreme_shapes.csv", index=False)
+    observed_extremes.to_csv(morphology_dir / "observed_pc_extremes.csv", index=False)
+    analysis.multivariate_extremes.to_csv(
+        morphology_dir / "multivariate_extreme_individuals.csv", index=False
+    )
+    analysis.cluster_k_selection.to_csv(morphology_dir / "cluster_k_selection.csv", index=False)
+    analysis.cluster_assignments.to_csv(morphology_dir / "cluster_assignments.csv", index=False)
+    analysis.cluster_summary.to_csv(morphology_dir / "cluster_summary.csv", index=False)
+
+    for cluster_id, points in analysis.cluster_mean_points.items():
+        filename = f"{cluster_id.replace(' ', '_')}_mean.ply"
+        trimesh.Trimesh(vertices=points, faces=inputs.faces, process=False).export(
+            cluster_dir / filename
+        )
+
+    _write_pc1_pc2_cluster_figure(
+        analysis,
+        result,
+        figures_dir / "pc1_pc2_clusters.png",
+    )
+    _write_variance_scree_figure(
+        result,
+        analysis.summary.loc[0, "variance_threshold"],
+        figures_dir / "pc_variance_scree.png",
+    )
+    return morphology_dir
+
+
+def _aligned_mesh_relative_path(sample_tag: str, aligned_dir: Path, out_dir: Path) -> str:
+    mesh_path = Path(aligned_dir) / f"{sample_tag}_aligned_whole_ear.ply"
+    return Path(os.path.relpath(mesh_path.resolve(), start=Path(out_dir).resolve())).as_posix()
+
+
+def _write_pc1_pc2_cluster_figure(
+    analysis: PcaMorphologyAnalysis,
+    result: PcaResult,
+    path: Path,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    _configure_plot_font(matplotlib)
+    import matplotlib.pyplot as plt
+
+    figure, axis = plt.subplots(figsize=(7.2, 5.4), constrained_layout=True)
+    assignments = analysis.cluster_assignments
+    if {"PC01", "PC02"}.issubset(assignments.columns):
+        palette = ("#2f6f8f", "#b6673d", "#5d8a63", "#8a5d7a", "#8d7a3f", "#556c9e")
+        if "cluster_id" in assignments.columns:
+            for index, cluster_id in enumerate(sorted(assignments["cluster_id"].unique())):
+                subset = assignments.loc[assignments["cluster_id"] == cluster_id]
+                axis.scatter(
+                    subset["PC01"], subset["PC02"], label=cluster_id,
+                    color=palette[index % len(palette)], edgecolors="#ffffff", linewidths=0.6,
+                )
+        else:
+            axis.scatter(assignments["PC01"], assignments["PC02"], color="#6f7d85")
+        available = analysis.observed_pc_extremes.loc[
+            analysis.observed_pc_extremes["status"] == "available"
+        ]
+        assignment_by_tag = assignments.set_index("sample_tag")
+        for row in available.itertuples(index=False):
+            if row.sample_tag not in assignment_by_tag.index:
+                continue
+            sample = assignment_by_tag.loc[row.sample_tag]
+            axis.scatter(sample.PC01, sample.PC02, color="#151e24", marker="x", s=46, zorder=3)
+            axis.annotate(
+                f"{row.component}{'+' if row.direction == 'plus' else '-'}\n{row.sample_tag}",
+                (sample.PC01, sample.PC02), xytext=(5, 5), textcoords="offset points", fontsize=7,
+            )
+        pc01 = float(result.explained_variance_ratio[0]) if len(result.explained_variance_ratio) else 0.0
+        pc02 = float(result.explained_variance_ratio[1]) if len(result.explained_variance_ratio) > 1 else 0.0
+        axis.set_xlabel(f"PC1 ({pc01:.1%})")
+        axis.set_ylabel(f"PC2 ({pc02:.1%})")
+        if "cluster_id" in assignments.columns:
+            axis.legend(title="形态聚类", frameon=False, fontsize=8)
+    else:
+        axis.text(0.5, 0.5, "PC1-PC2 散点图不可用\n非零主成分不足 2 个", ha="center", va="center")
+        axis.set_axis_off()
+    axis.set_title("PCA 形态聚类与真实方向极值")
+    axis.grid(alpha=0.2)
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+
+
+def _write_variance_scree_figure(result: PcaResult, variance_threshold: float, path: Path) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    _configure_plot_font(matplotlib)
+    import matplotlib.pyplot as plt
+
+    components = np.arange(1, len(result.explained_variance_ratio) + 1)
+    figure, axis = plt.subplots(figsize=(7.2, 4.6), constrained_layout=True)
+    axis.bar(components, result.explained_variance_ratio, color="#5f8798", label="单个 PC")
+    axis.plot(
+        components, result.cumulative_explained_variance_ratio,
+        color="#b6673d", marker="o", linewidth=1.8, label="累计解释方差",
+    )
+    axis.axhline(float(variance_threshold), color="#4c5960", linestyle="--", linewidth=1.0)
+    axis.axvline(result.n_components_75, color="#4c5960", linestyle=":", linewidth=1.0)
+    axis.set_xticks(components)
+    axis.set_xlabel("主成分")
+    axis.set_ylabel("解释方差比例")
+    axis.set_ylim(0.0, 1.05)
+    axis.set_title("PCA 解释方差（Scree 图）")
+    axis.legend(frameon=False, fontsize=8)
+    axis.grid(axis="y", alpha=0.2)
+    figure.savefig(path, dpi=160)
+    plt.close(figure)
+
+
+def _configure_plot_font(matplotlib) -> None:
+    """Prefer a Windows Chinese font so CLI figures remain readable offline."""
+    from matplotlib import font_manager
+
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for family in ("Noto Sans SC", "Microsoft YaHei", "SimHei", "SimSun"):
+        if family in available:
+            matplotlib.rcParams["font.family"] = family
+            break
+    matplotlib.rcParams["axes.unicode_minus"] = False
 
 
 def _retained_scores(result: PcaResult, order: np.ndarray) -> tuple[list[str], np.ndarray]:
