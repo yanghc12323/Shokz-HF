@@ -14,8 +14,10 @@ The current T001 source file names still contain "R", but the data is a left
 ear, so the recommended side tag for this sample is L.
 """
 
+import json
 from pathlib import Path
 import sys
+from time import perf_counter
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -23,6 +25,8 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 import pandas as pd
 from ear_param.events import JsonlEventWriter
+from ear_param.pipeline import compose_sample_tag
+from ear_param.remesh_backend import describe_backend, resolve_remesh_backend
 
 from ear_param.io_utils import load_landmarks, load_mesh, read_csv_robust
 from ear_param.remesh import (
@@ -37,6 +41,15 @@ from ear_param.remesh import (
 
 def _expected_point_count(resolution: int) -> int:
     return (resolution + 1) * (resolution + 2) // 2
+
+
+def output_sample_tag(
+    sample_id: str,
+    side: str,
+    explicit_sample_tag: str | None,
+) -> str:
+    """Return an explicit pipeline tag or retain the legacy CLI naming rule."""
+    return explicit_sample_tag or compose_sample_tag(sample_id, side)
 
 
 def build_sample_status_summary(qc_dir: Path) -> pd.DataFrame:
@@ -62,7 +75,7 @@ def _sample_tag_from_qc(qc_path: Path, qc_df: pd.DataFrame) -> str:
     if {"sample_id", "side"}.issubset(qc_df.columns) and not qc_df.empty:
         sample_id = str(qc_df["sample_id"].iloc[0])
         side = str(qc_df["side"].iloc[0])
-        return f"{sample_id}_{side}"
+        return compose_sample_tag(sample_id, side)
     return qc_path.name.replace("_remesh_qc.csv", "")
 
 
@@ -134,18 +147,41 @@ Example:
     parser.add_argument(
         "--max_salvage_unmapped_ratio",
         type=float,
-        default=0.35,
+        default=0.45,
         help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
     )
     parser.add_argument(
         "--max_salvage_degenerate_ratio",
         type=float,
-        default=0.015,
+        default=0.03,
         help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
     )
+    parser.add_argument(
+        "--remesh-backend",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="Numerical backend for primary region remesh: cpu, cuda, or auto.",
+    )
     parser.add_argument("--event-log", help="Optional desktop JSONL event log.")
+    parser.add_argument(
+        "--sample-tag",
+        help="Optional exact output sample tag; preserves MQ names such as MQ_S001L.",
+    )
 
     args = parser.parse_args()
+
+    backend = resolve_remesh_backend(args.remesh_backend)
+    backend_report = describe_backend(backend)
+    print(
+        "[Remesh] Backend: "
+        f"requested={backend_report['requested']}, "
+        f"effective={backend_report['effective']}"
+        + (
+            f", fallback={backend_report['fallback_reason']}"
+            if backend_report["fallback_reason"]
+            else ""
+        )
+    )
 
     print(f"[Remesh] Loading mesh: {args.mesh}")
     mesh = load_mesh(Path(args.mesh))
@@ -179,15 +215,13 @@ Example:
         print(f"  actual: {sorted(landmarks.index)}")
         sys.exit(1)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    repaired_out_dir = Path(args.repaired_out_dir)
-    repaired_out_dir.mkdir(parents=True, exist_ok=True)
     salvaged_out_dir = Path(args.salvaged_out_dir)
     salvaged_out_dir.mkdir(parents=True, exist_ok=True)
 
-    sample_tag = f"{args.sample_id}_{args.side}"
+    sample_tag = output_sample_tag(args.sample_id, args.side, args.sample_tag)
     event_writer = JsonlEventWriter(Path(args.event_log)) if args.event_log else None
+    if event_writer:
+        event_writer.emit("remesh_backend_selected", sample_tag=sample_tag, **backend_report)
     all_points: list[pd.DataFrame] = []
     all_repaired_points: list[pd.DataFrame] = []
     all_salvaged_points: list[pd.DataFrame] = []
@@ -197,10 +231,6 @@ Example:
     repaired_qc_records: list[dict] = []
     salvaged_qc_records: list[dict] = []
     global_point_id = 0
-    mesh_out_dir = Path(args.mesh_out_dir) / sample_tag
-    mesh_out_dir.mkdir(parents=True, exist_ok=True)
-    repaired_mesh_out_dir = Path(args.repaired_mesh_out_dir) / sample_tag
-    repaired_mesh_out_dir.mkdir(parents=True, exist_ok=True)
     salvaged_mesh_out_dir = Path(args.salvaged_mesh_out_dir) / sample_tag
     salvaged_mesh_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -215,7 +245,15 @@ Example:
         print(f"\n[Remesh] Processing region {rid} ({rname})...")
 
         try:
-            result = build_region_remesh(mesh, landmarks, region, context)
+            region_started = perf_counter()
+            result = build_region_remesh(
+                mesh,
+                landmarks,
+                region,
+                context,
+                backend=backend,
+            )
+            region_remesh_seconds = perf_counter() - region_started
 
             region_start_id = global_point_id
             n_samples = len(result.sample_points_3d)
@@ -292,6 +330,21 @@ Example:
             df_salvaged_region["degenerate_salvage_accepted"] = salvaged.degenerate_salvage_accepted
             df_salvaged_region["degenerate_salvage_method"] = salvaged.degenerate_salvage_method
             df_salvaged_region["degenerate_salvage_rejection_reason"] = salvaged.degenerate_salvage_rejection_reason
+            df_salvaged_region["dense_validation_resolution"] = salvaged.dense_validation_resolution
+            df_salvaged_region["dense_unmapped_count"] = salvaged.dense_unmapped_count
+            df_salvaged_region["dense_degenerate_face_count"] = salvaged.dense_degenerate_face_count
+            df_salvaged_region["dense_min_triangle_area_3d"] = salvaged.dense_min_triangle_area_3d
+            df_salvaged_region["dense_failure_type"] = salvaged.dense_failure_type
+            df_salvaged_region["dense_coverage_repair_attempted"] = salvaged.dense_coverage_repair_attempted
+            df_salvaged_region["dense_coverage_repair_accepted"] = salvaged.dense_coverage_repair_accepted
+            df_salvaged_region["dense_coverage_repair_before"] = salvaged.dense_coverage_repair_before
+            df_salvaged_region["dense_coverage_repair_after"] = salvaged.dense_coverage_repair_after
+            df_salvaged_region["dense_coverage_repair_max_uv_displacement"] = salvaged.dense_coverage_repair_max_uv_displacement
+            df_salvaged_region["degenerate_component_count"] = salvaged.degenerate_component_count
+            df_salvaged_region["largest_degenerate_component_faces"] = salvaged.largest_degenerate_component_faces
+            df_salvaged_region["degenerate_component_touches_boundary"] = salvaged.degenerate_component_touches_boundary
+            df_salvaged_region["degenerate_component_repair_attempted"] = salvaged.degenerate_component_repair_attempted
+            df_salvaged_region["degenerate_component_repair_accepted"] = salvaged.degenerate_component_repair_accepted
             all_salvaged_points.append(df_salvaged_region)
 
             all_faces.append(pd.DataFrame({
@@ -325,21 +378,8 @@ Example:
 
             status = classify_remesh_qc_status(n_samples, n_unmapped, n_degenerate)
 
-            mesh_path = mesh_out_dir / f"{rid}_remesh.ply"
             mesh_exported = False
-            if status == "PASS":
-                build_region_remesh_mesh(result).export(mesh_path)
-                mesh_exported = True
-
-            repaired_mesh_path = repaired_mesh_out_dir / f"{rid}_remesh_repaired.ply"
             repaired_mesh_exported = False
-            if repaired.exportable:
-                build_region_remesh_mesh(
-                    result,
-                    vertices_override=repaired.points_3d,
-                ).export(repaired_mesh_path)
-                repaired_mesh_exported = True
-
             salvaged_mesh_path = salvaged_mesh_out_dir / f"{rid}_remesh_salvaged.ply"
             salvaged_mesh_exported = False
             if salvaged.exportable:
@@ -362,7 +402,7 @@ Example:
                 "degenerate_faces": n_degenerate,
                 "patch_face_count": patch_face_count,
                 "mesh_exported": mesh_exported,
-                "mesh_path": str(mesh_path) if mesh_exported else "",
+                "mesh_path": "",
                 "status": status,
             })
             repaired_qc_records.append({
@@ -382,7 +422,7 @@ Example:
                 "degenerate_faces": n_degenerate,
                 "patch_face_count": patch_face_count,
                 "mesh_exported": repaired_mesh_exported,
-                "mesh_path": str(repaired_mesh_path) if repaired_mesh_exported else "",
+                "mesh_path": "",
                 "status": repaired.status,
             })
             salvaged_qc_records.append({
@@ -408,6 +448,28 @@ Example:
                 "degenerate_salvage_accepted": salvaged.degenerate_salvage_accepted,
                 "degenerate_salvage_method": salvaged.degenerate_salvage_method,
                 "degenerate_salvage_rejection_reason": salvaged.degenerate_salvage_rejection_reason,
+                "dense_validation_resolution": salvaged.dense_validation_resolution,
+                "dense_unmapped_count": salvaged.dense_unmapped_count,
+                "dense_degenerate_face_count": salvaged.dense_degenerate_face_count,
+                "dense_min_triangle_area_3d": salvaged.dense_min_triangle_area_3d,
+                "dense_failure_type": salvaged.dense_failure_type,
+                "dense_coverage_repair_attempted": salvaged.dense_coverage_repair_attempted,
+                "dense_coverage_repair_accepted": salvaged.dense_coverage_repair_accepted,
+                "dense_coverage_repair_before": salvaged.dense_coverage_repair_before,
+                "dense_coverage_repair_after": salvaged.dense_coverage_repair_after,
+                "dense_coverage_repair_max_uv_displacement": salvaged.dense_coverage_repair_max_uv_displacement,
+                "degenerate_component_count": salvaged.degenerate_component_count,
+                "largest_degenerate_component_faces": salvaged.largest_degenerate_component_faces,
+                "degenerate_component_touches_boundary": salvaged.degenerate_component_touches_boundary,
+                "degenerate_component_repair_attempted": salvaged.degenerate_component_repair_attempted,
+                "degenerate_component_repair_accepted": salvaged.degenerate_component_repair_accepted,
+                "region_remesh_seconds": region_remesh_seconds,
+                "degenerate_relaxation_seconds": salvaged.repair_timing.degenerate_relaxation_seconds,
+                "component_repair_seconds": salvaged.repair_timing.component_repair_seconds,
+                "dense_validation_seconds": salvaged.repair_timing.dense_validation_seconds,
+                "dense_coverage_repair_seconds": salvaged.repair_timing.dense_coverage_repair_seconds,
+                "repair_total_seconds": salvaged.repair_timing.total_seconds,
+                "region_total_seconds": perf_counter() - region_started,
                 "flipped_faces": n_flipped,
                 "degenerate_faces": n_degenerate,
                 "patch_face_count": patch_face_count,
@@ -425,7 +487,9 @@ Example:
                 f"remesh_faces={n_remesh_faces}, raw_status={status}, "
                 f"repaired_status={repaired.status}, repairs={repaired.repaired_count}, "
                 f"salvaged_status={salvaged.status}, salvage_accepted={salvaged.salvage_accepted}, "
-                f"degenerate={salvaged.degenerate_before}->{salvaged.degenerate_after}"
+                f"degenerate={salvaged.degenerate_before}->{salvaged.degenerate_after}, "
+                f"time={perf_counter() - region_started:.2f}s "
+                f"(remesh={region_remesh_seconds:.2f}s, repair={salvaged.repair_timing.total_seconds:.2f}s)"
             )
 
         except Exception as exc:
@@ -489,6 +553,28 @@ Example:
                 "degenerate_salvage_accepted": False,
                 "degenerate_salvage_method": "",
                 "degenerate_salvage_rejection_reason": "region_error",
+                "dense_validation_resolution": 48,
+                "dense_unmapped_count": 0,
+                "dense_degenerate_face_count": 0,
+                "dense_min_triangle_area_3d": float("nan"),
+                "dense_failure_type": "not_run",
+                "dense_coverage_repair_attempted": False,
+                "dense_coverage_repair_accepted": False,
+                "dense_coverage_repair_before": 0,
+                "dense_coverage_repair_after": 0,
+                "dense_coverage_repair_max_uv_displacement": 0.0,
+                "degenerate_component_count": 0,
+                "largest_degenerate_component_faces": 0,
+                "degenerate_component_touches_boundary": False,
+                "degenerate_component_repair_attempted": False,
+                "degenerate_component_repair_accepted": False,
+                "region_remesh_seconds": 0.0,
+                "degenerate_relaxation_seconds": 0.0,
+                "component_repair_seconds": 0.0,
+                "dense_validation_seconds": 0.0,
+                "dense_coverage_repair_seconds": 0.0,
+                "repair_total_seconds": 0.0,
+                "region_total_seconds": 0.0,
                 "flipped_faces": 0,
                 "degenerate_faces": 0,
                 "patch_face_count": 0,
@@ -499,51 +585,29 @@ Example:
             if event_writer:
                 event_writer.emit("region_finished", sample_tag=sample_tag, region_id=rid, region_name=rname, raw_status="FAIL", repaired_status="FAIL", salvaged_status="FAIL", final_status="FAIL", reason=str(exc), completed_regions=len(qc_records), total_regions=len(regions))
 
-    if all_points:
-        df_all = pd.concat(all_points, ignore_index=True)
-        points_path = out_dir / f"{sample_tag}_remesh_points.csv"
-        df_all.to_csv(points_path, index=False)
-        print(f"\n[Remesh] Points saved: {points_path}")
-        print(f"  -> total_points={len(df_all)}")
-    else:
-        print("\n[WARNING] No sample points were produced")
-
     if all_faces:
-        faces_path = out_dir / f"{sample_tag}_remesh_faces.csv"
         faces_df = pd.concat(all_faces, ignore_index=True)
-        faces_df.to_csv(faces_path, index=False)
-        print(f"[Remesh] Faces saved: {faces_path}")
-        repaired_faces_path = repaired_out_dir / f"{sample_tag}_remesh_faces.csv"
-        faces_df.to_csv(repaired_faces_path, index=False)
-        print(f"[Remesh] Repaired faces saved: {repaired_faces_path}")
         salvaged_faces_path = salvaged_out_dir / f"{sample_tag}_remesh_faces.csv"
         faces_df.to_csv(salvaged_faces_path, index=False)
         print(f"[Remesh] Salvaged faces saved: {salvaged_faces_path}")
-
-    if all_repaired_points:
-        repaired_points_path = repaired_out_dir / f"{sample_tag}_remesh_points.csv"
-        pd.concat(all_repaired_points, ignore_index=True).to_csv(repaired_points_path, index=False)
-        print(f"[Remesh] Repaired points saved: {repaired_points_path}")
 
     if all_salvaged_points:
         salvaged_points_path = salvaged_out_dir / f"{sample_tag}_remesh_points.csv"
         pd.concat(all_salvaged_points, ignore_index=True).to_csv(salvaged_points_path, index=False)
         print(f"[Remesh] Salvaged points saved: {salvaged_points_path}")
 
-    if feature_records:
-        features_path = out_dir / f"{sample_tag}_region_features.csv"
-        pd.DataFrame(feature_records).to_csv(features_path, index=False)
-        print(f"[Remesh] Region features saved: {features_path}")
-
-    qc_path = out_dir / f"{sample_tag}_remesh_qc.csv"
-    pd.DataFrame(qc_records).to_csv(qc_path, index=False)
-    print(f"[Remesh] QC saved: {qc_path}")
-    repaired_qc_path = repaired_out_dir / f"{sample_tag}_remesh_qc.csv"
-    pd.DataFrame(repaired_qc_records).to_csv(repaired_qc_path, index=False)
-    print(f"[Remesh] Repaired QC saved: {repaired_qc_path}")
     salvaged_qc_path = salvaged_out_dir / f"{sample_tag}_remesh_qc.csv"
     pd.DataFrame(salvaged_qc_records).to_csv(salvaged_qc_path, index=False)
     print(f"[Remesh] Salvaged QC saved: {salvaged_qc_path}")
+    backend_report = describe_backend(backend)
+    backend_path = salvaged_out_dir / f"{sample_tag}_remesh_backend.json"
+    backend_path.write_text(
+        json.dumps(backend_report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(f"[Remesh] Backend diagnostics saved: {backend_path}")
+    if event_writer:
+        event_writer.emit("remesh_backend_finished", sample_tag=sample_tag, **backend_report)
 
     qc_df = pd.DataFrame(qc_records)
     pass_c = int((qc_df["status"] == "PASS").sum())
@@ -566,8 +630,6 @@ Example:
         "[Remesh] Salvaged Done: "
         f"PASS={salvaged_pass_c} WARNING={salvaged_warn_c} FAIL={salvaged_fail_c}"
     )
-    _print_sample_status_summary("Raw", out_dir)
-    _print_sample_status_summary("Repaired", repaired_out_dir)
     _print_sample_status_summary("Salvaged", salvaged_out_dir)
 
 

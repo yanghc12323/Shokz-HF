@@ -166,6 +166,7 @@ def create_run_manifest(
             "parallel_workers_effective": _effective_parallel_workers(
                 config.parallel_workers
             ),
+            "remesh_backend_requested": config.remesh_backend,
         },
         "inputs": inputs,
         "config_files": {
@@ -190,6 +191,7 @@ def create_run_manifest(
             "platform": platform.platform(),
             "numpy": _package_version("numpy"),
             "pandas": _package_version("pandas"),
+            "cupy": _package_version("cupy"),
         },
         "code": _git_code_state(project_root),
         "result": None,
@@ -244,6 +246,15 @@ def finish_manifest(
     manifest["error"] = error
     if result is not None:
         records = result.records
+        remesh_backend = _json_safe(getattr(result, "remesh_backend_summary", {}))
+        if remesh_backend:
+            parameters = manifest.setdefault("parameters", {})
+            runtime = manifest.setdefault("runtime", {})
+            parameters["remesh_backend_effective"] = remesh_backend.get("effective", "cpu")
+            parameters["remesh_backend_fallback_reason"] = remesh_backend.get(
+                "fallback_reason", ""
+            )
+            runtime["remesh_backend"] = remesh_backend
         manifest["result"] = {
             "sample_count": len(records),
             "ready_count": _count(records, "discovery", "READY"),

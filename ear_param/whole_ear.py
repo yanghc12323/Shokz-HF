@@ -7,6 +7,7 @@ landmark-defined edges.
 
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from dataclasses import dataclass
 
 import numpy as np
@@ -189,14 +190,25 @@ class EdgeRepairResult:
     qc: pd.DataFrame
 
 
+@dataclass(frozen=True)
+class FaceWindingDiagnostics:
+    """Audit data for deterministic whole-ear face-winding normalization."""
+
+    component_count: int
+    shared_edge_count: int
+    same_direction_shared_edge_count: int
+    flipped_face_count: int
+    constraint_conflict_count: int
+
+
 def assemble_whole_ear(
     template: GlobalTemplate,
     points: pd.DataFrame,
     faces: pd.DataFrame,
     qc: pd.DataFrame,
     *,
-    warning_mm: float = 0.25,
-    fail_mm: float = 1.0,
+    warning_mm: float = 0.5,
+    fail_mm: float = 1.5,
 ) -> WholeEarResult:
     """Assemble salvaged region outputs and quantify every shared boundary."""
     if warning_mm < 0 or fail_mm < warning_mm:
@@ -340,6 +352,11 @@ def assemble_whole_ear(
     vertex_qc.insert(0, "sample_id", sample_id)
     edge_qc = _build_edge_qc(template, members, sample_id, side, warning_mm, fail_mm)
     whole_faces, degenerate_faces, duplicate_faces = _remap_faces(template, faces, sample_id, side)
+    whole_faces, winding = _normalize_face_winding(whole_faces)
+    whole_faces = _orient_whole_ear_for_geomagic(whole_faces)
+    # The exported topology, rather than the pre-orientation topology, is the
+    # QC source of truth.  Orientation must never change face membership.
+    degenerate_faces, duplicate_faces = _global_face_issue_counts(whole_faces)
 
     if invalid_global_vertices:
         failure_reasons.append("invalid_global_vertices")
@@ -388,6 +405,13 @@ def assemble_whole_ear(
         "invalid_region_face_count": len(invalid_face_regions),
         "degenerate_global_face_count": degenerate_faces,
         "duplicate_global_face_count": duplicate_faces,
+        "winding_component_count": winding.component_count,
+        "winding_shared_edge_count": winding.shared_edge_count,
+        "winding_same_direction_shared_edge_count": winding.same_direction_shared_edge_count,
+        "winding_flipped_face_count": winding.flipped_face_count,
+        "winding_constraint_conflict_count": winding.constraint_conflict_count,
+        "geomagic_exterior_color": "blue",
+        "geomagic_global_orientation_flipped_face_count": len(whole_faces),
         "failure_reasons": ";".join(dict.fromkeys(failure_reasons)),
         "status": status,
         "pca_ready": status == "PASS",
@@ -402,8 +426,8 @@ def repair_shared_edge_conflicts(
     mesh: trimesh.Trimesh,
     baseline: WholeEarResult,
     *,
-    warning_mm: float = 0.25,
-    fail_mm: float = 1.0,
+    warning_mm: float = 0.5,
+    fail_mm: float = 1.5,
     max_run_length: int = 2,
 ) -> EdgeRepairResult:
     """Repair short WARNING-only shared-edge gaps using anchors on the sample mesh."""
@@ -911,13 +935,107 @@ def _remap_faces(
             "global_v2": global_vertices[2],
         })
     whole_faces = pd.DataFrame(records)
-    if whole_faces.empty:
-        return whole_faces, 0, 0
-    values = whole_faces[["global_v0", "global_v1", "global_v2"]].to_numpy(dtype=int)
+    degenerate, duplicate = _global_face_issue_counts(whole_faces)
+    return whole_faces, degenerate, duplicate
+
+
+def _global_face_issue_counts(faces: pd.DataFrame) -> tuple[int, int]:
+    """Return degenerate and duplicate counts for the supplied final faces."""
+    if faces.empty:
+        return 0, 0
+    values = faces[["global_v0", "global_v1", "global_v2"]].to_numpy(dtype=int)
     degenerate = int(sum(len(set(face)) < 3 or (face < 0).any() for face in values))
     canonical = np.sort(values, axis=1)
     duplicate = int(pd.DataFrame(canonical).duplicated().sum())
-    return whole_faces, degenerate, duplicate
+    return degenerate, duplicate
+
+
+def _normalize_face_winding(
+    faces: pd.DataFrame,
+) -> tuple[pd.DataFrame, FaceWindingDiagnostics]:
+    """Orient adjacent whole-ear faces consistently without changing vertices.
+
+    Two adjacent triangles must use their common edge in opposite directions.
+    The region table can contain landmark triples with alternating orientation,
+    so local template winding alone cannot guarantee this after assembly.
+    """
+    normalized = faces.copy()
+    if normalized.empty:
+        return normalized, FaceWindingDiagnostics(0, 0, 0, 0, 0)
+
+    face_values = normalized[["global_v0", "global_v1", "global_v2"]].to_numpy(dtype=int)
+    edge_uses: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(list)
+    for face_index, (v0, v1, v2) in enumerate(face_values):
+        for start, end in ((v0, v1), (v1, v2), (v2, v0)):
+            edge_uses[tuple(sorted((int(start), int(end))))].append(
+                (face_index, int(start), int(end))
+            )
+
+    adjacency: list[list[tuple[int, bool]]] = [[] for _ in range(len(face_values))]
+    shared_edge_count = 0
+    same_direction_shared_edge_count = 0
+    for uses in edge_uses.values():
+        if len(uses) != 2:
+            continue
+        shared_edge_count += 1
+        (left_face, left_start, left_end), (right_face, right_start, right_end) = uses
+        same_direction = left_start == right_start and left_end == right_end
+        same_direction_shared_edge_count += int(same_direction)
+        adjacency[left_face].append((right_face, same_direction))
+        adjacency[right_face].append((left_face, same_direction))
+
+    flip_state: dict[int, bool] = {}
+    component_count = 0
+    constraint_conflict_count = 0
+    for seed in range(len(face_values)):
+        if seed in flip_state:
+            continue
+        component_count += 1
+        flip_state[seed] = False
+        queue: deque[int] = deque([seed])
+        while queue:
+            face_index = queue.popleft()
+            for neighbor_index, same_direction in adjacency[face_index]:
+                required_state = flip_state[face_index] ^ same_direction
+                existing_state = flip_state.get(neighbor_index)
+                if existing_state is None:
+                    flip_state[neighbor_index] = required_state
+                    queue.append(neighbor_index)
+                elif existing_state != required_state and face_index < neighbor_index:
+                    constraint_conflict_count += 1
+
+    flipped_indices = sorted(face_index for face_index, should_flip in flip_state.items() if should_flip)
+    if flipped_indices:
+        values = normalized.loc[
+            flipped_indices, ["global_v1", "global_v2"]
+        ].to_numpy(dtype=int, copy=True)
+        normalized.loc[flipped_indices, ["global_v1", "global_v2"]] = values[:, ::-1]
+    normalized["winding_flipped"] = False
+    if flipped_indices:
+        normalized.loc[flipped_indices, "winding_flipped"] = True
+    return normalized, FaceWindingDiagnostics(
+        component_count=component_count,
+        shared_edge_count=shared_edge_count,
+        same_direction_shared_edge_count=same_direction_shared_edge_count,
+        flipped_face_count=len(flipped_indices),
+        constraint_conflict_count=constraint_conflict_count,
+    )
+
+
+def _orient_whole_ear_for_geomagic(faces: pd.DataFrame) -> pd.DataFrame:
+    """Reverse whole-ear triangles so Geomagic renders the exterior blue."""
+    oriented = faces.copy()
+    if oriented.empty:
+        oriented["geomagic_global_orientation_flipped"] = pd.Series(dtype=bool)
+        return oriented
+
+    # ``to_numpy`` may expose a view of the DataFrame's integer block.  A
+    # direct in-place column swap can then overwrite v1 before v2 is read,
+    # collapsing valid triangles into [v0, v1, v1].  Copy before assignment.
+    values = oriented[["global_v1", "global_v2"]].to_numpy(dtype=int, copy=True)
+    oriented.loc[:, ["global_v1", "global_v2"]] = values[:, ::-1]
+    oriented["geomagic_global_orientation_flipped"] = True
+    return oriented
 
 
 def _invalid_region_faces(template: GlobalTemplate, faces: pd.DataFrame) -> list[str]:

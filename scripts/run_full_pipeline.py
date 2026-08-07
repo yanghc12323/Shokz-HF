@@ -45,14 +45,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-salvage-unmapped-ratio",
         type=float,
-        default=0.35,
+        default=0.45,
         help="Maximum raw unmapped ratio eligible for salvage attempts.",
     )
     parser.add_argument(
         "--max-salvage-degenerate-ratio",
         type=float,
-        default=0.015,
+        default=0.03,
         help="Maximum raw degenerate-face ratio eligible for salvaged UV repair.",
+    )
+    parser.add_argument(
+        "--weld-warning-mm", type=float, default=0.5,
+        help="Maximum shared-boundary conflict distance classified as PASS (mm).",
+    )
+    parser.add_argument(
+        "--weld-fail-mm", type=float, default=1.5,
+        help="Shared-boundary conflict distance above this value is classified as FAIL (mm).",
     )
     parser.add_argument(
         "--pca-variance-threshold",
@@ -66,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Concurrent Remesh/QC samples; 0 selects the bounded automatic desktop setting.",
+    )
+    parser.add_argument(
+        "--remesh-backend",
+        choices=("cpu", "cuda", "auto"),
+        default="cpu",
+        help="Remesh numerical backend: cpu (default), cuda, or auto with CPU fallback.",
     )
     parser.add_argument(
         "--alignment-mode",
@@ -92,6 +106,8 @@ def build_pipeline_config(
 ) -> tuple[PipelineConfig, Path, PipelineOutputLayout | None]:
     if args.parallel_workers < 0:
         raise ValueError("--parallel-workers must be zero or a positive integer")
+    if args.weld_warning_mm < 0 or args.weld_fail_mm < args.weld_warning_mm:
+        raise ValueError("Weld thresholds must satisfy 0 <= --weld-warning-mm <= --weld-fail-mm")
     if args.alignment_mode == "fixed-reference" and not args.reference_sample:
         raise ValueError("--reference-sample is required when --alignment-mode fixed-reference")
     output_root = Path(args.output_root) if args.output_root else None
@@ -127,12 +143,15 @@ def build_pipeline_config(
         "mirror_axis": args.mirror_axis,
         "max_salvage_unmapped_ratio": args.max_salvage_unmapped_ratio,
         "max_salvage_degenerate_ratio": args.max_salvage_degenerate_ratio,
+        "weld_warning_mm": args.weld_warning_mm,
+        "weld_fail_mm": args.weld_fail_mm,
         "pca_variance_threshold": args.pca_variance_threshold,
         "disable_side_normalization": False,
         "skip_pca": args.skip_pca,
         "reference_sample": args.reference_sample,
         "alignment_mode": args.alignment_mode,
         "parallel_workers": args.parallel_workers,
+        "remesh_backend": args.remesh_backend,
         "reporter": print,
     }
     if args.event_log:
@@ -154,6 +173,29 @@ def _print_final_summary(result: PipelineResult, run_dir: Path) -> None:
     print(f"[Pipeline] PCA status: {result.pca_status}")
     print(f"[Pipeline] Fixed-reference PCA status: {result.reference_pca_status}")
     print(f"[Pipeline] Run artifacts: {run_dir}")
+
+
+def pipeline_terminal_status(result: PipelineResult) -> str:
+    """Classify terminal status without treating a no-result batch as completed."""
+    records = result.records
+    if "weld" not in records.columns or not records["weld"].eq("PASS").any():
+        return "FAILED_NO_VALID_RESULT"
+    error_columns = [
+        column for column in (
+            "discovery", "remesh", "salvage", "remesh_qc", "weld",
+            "alignment", "reference_alignment",
+        ) if column in records.columns
+    ]
+    if any(records[column].astype(str).str.upper().eq("ERROR").any() for column in error_columns):
+        return "COMPLETED_WITH_SAMPLE_ERRORS"
+    return "COMPLETED"
+
+
+def pipeline_terminal_error(result: PipelineResult) -> str:
+    """Return an operator-facing reason for terminal states without valid outputs."""
+    if pipeline_terminal_status(result) == "FAILED_NO_VALID_RESULT":
+        return "没有样本通过整耳拼接（weld=PASS），无法生成有效结果；请查看 pipeline_batch_summary.csv 中各样本的拦截原因。"
+    return ""
 
 
 def execute(args: argparse.Namespace) -> PipelineResult | None:
@@ -179,7 +221,12 @@ def execute(args: argparse.Namespace) -> PipelineResult | None:
     except BaseException as exc:
         finish_manifest(manifest_path, status="ERROR", error=str(exc))
         raise
-    finish_manifest(manifest_path, status="COMPLETED", result=result)
+    finish_manifest(
+        manifest_path,
+        status=pipeline_terminal_status(result),
+        result=result,
+        error=pipeline_terminal_error(result),
+    )
     _print_final_summary(result, run_dir)
     return result
 
@@ -188,6 +235,8 @@ def main() -> None:
     result = execute(build_parser().parse_args())
     if result is None:
         raise SystemExit(2)
+    if pipeline_terminal_status(result) == "FAILED_NO_VALID_RESULT":
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

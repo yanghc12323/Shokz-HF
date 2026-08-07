@@ -2,12 +2,16 @@
 # -*- coding: utf-8 -*-
 """Tests for patch-based remesh building blocks."""
 
+from contextlib import nullcontext
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 import trimesh
 
 import ear_param.remesh as remesh
+from ear_param.remesh_backend import BackendComputationError, resolve_remesh_backend
 from ear_param.remesh import (
     BoundaryPaths,
     LocatedSamples,
@@ -117,6 +121,52 @@ def test_remesh_context_reuses_template_and_reverses_shared_path(
 
     assert first.template is second.template
     assert first.boundary_paths.path_ab == list(reversed(second.boundary_paths.path_bc))
+
+
+def test_remesh_context_reuses_one_dijkstra_tree_for_multiple_paths(
+    monkeypatch, center_patch_mesh, triangle_landmarks
+):
+    calls: list[int] = []
+    original = remesh.dijkstra
+
+    def tracked(graph, *, directed, indices, return_predecessors):
+        calls.append(int(indices))
+        return original(
+            graph,
+            directed=directed,
+            indices=indices,
+            return_predecessors=return_predecessors,
+        )
+
+    monkeypatch.setattr(remesh, "dijkstra", tracked)
+    regions = [
+        {
+            "region_id": "R1",
+            "region_name": "one",
+            "lm_a": "L10",
+            "lm_b": "L20",
+            "lm_c": "L30",
+            "resolution": 2,
+        },
+        {
+            "region_id": "R2",
+            "region_name": "two",
+            "lm_a": "L10",
+            "lm_b": "L30",
+            "lm_c": "L20",
+            "resolution": 2,
+        },
+    ]
+
+    context = remesh.prepare_remesh_context(
+        center_patch_mesh, triangle_landmarks, regions
+    )
+    for region in regions:
+        remesh.build_region_remesh(
+            center_patch_mesh, triangle_landmarks, region, context
+        )
+
+    assert calls.count(context.snapped_landmarks["L10"].vertex_id) == 1
 
 
 def test_boundary_paths_follow_mesh_edges(single_triangle_mesh, triangle_landmarks):
@@ -274,6 +324,135 @@ def test_build_region_remesh_runs_stages_1_to_8(single_triangle_mesh, triangle_l
     assert result.located_samples.unmapped_count == 0
     assert result.sample_points_3d.shape == (6, 3)
     np.testing.assert_allclose(result.sample_points_3d[:, :2], result.template.uv)
+
+
+def test_build_region_remesh_routes_uv_work_through_selected_backend(
+    center_patch_mesh, triangle_landmarks
+):
+    class TrackingBackend:
+        def __init__(self):
+            self.delegate = resolve_remesh_backend("cpu")
+            self.name = "tracking"
+            self.requested = "tracking"
+            self.fallback_reason = ""
+            self.calls = {"solve": 0, "locate": 0, "map": 0}
+
+        def solve_harmonic(self, matrix, rhs):
+            self.calls["solve"] += 1
+            return self.delegate.solve_harmonic(matrix, rhs)
+
+        def locate(self, uv, faces, sample_uv, tol):
+            self.calls["locate"] += 1
+            return self.delegate.locate(uv, faces, sample_uv, tol)
+
+        def map_to_3d(self, vertices, faces, face_ids, barycentric):
+            self.calls["map"] += 1
+            return self.delegate.map_to_3d(vertices, faces, face_ids, barycentric)
+
+        def region_scope(self):
+            return nullcontext()
+
+    backend = TrackingBackend()
+    region = {
+        "region_id": "T900",
+        "region_name": "test triangle region",
+        "lm_a": "L10",
+        "lm_b": "L20",
+        "lm_c": "L30",
+        "resolution": 2,
+    }
+
+    result = build_region_remesh(
+        center_patch_mesh,
+        triangle_landmarks,
+        region,
+        backend=backend,
+    )
+
+    assert backend.calls == {"solve": 1, "locate": 1, "map": 1}
+    assert result.located_samples.unmapped_count == 0
+
+
+def test_explicit_cpu_backend_matches_default_region_result(
+    center_patch_mesh, triangle_landmarks
+):
+    region = {
+        "region_id": "T900",
+        "region_name": "test triangle region",
+        "lm_a": "L10",
+        "lm_b": "L20",
+        "lm_c": "L30",
+        "resolution": 2,
+    }
+
+    default_result = build_region_remesh(center_patch_mesh, triangle_landmarks, region)
+    cpu_result = build_region_remesh(
+        center_patch_mesh,
+        triangle_landmarks,
+        region,
+        backend=resolve_remesh_backend("cpu"),
+    )
+
+    np.testing.assert_array_equal(
+        cpu_result.located_samples.face_indices,
+        default_result.located_samples.face_indices,
+    )
+    np.testing.assert_allclose(
+        cpu_result.located_samples.barycentric,
+        default_result.located_samples.barycentric,
+        atol=0.0,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        cpu_result.sample_points_3d,
+        default_result.sample_points_3d,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+
+def test_auto_cuda_backend_recomputes_the_entire_region_on_cpu_after_backend_error(
+    center_patch_mesh, triangle_landmarks
+):
+    class FailingCudaBackend:
+        name = "cuda"
+        requested = "auto"
+        fallback_reason = ""
+
+        def region_scope(self):
+            return nullcontext()
+
+        def solve_harmonic(self, matrix, rhs):
+            raise BackendComputationError("simulated CUDA failure")
+
+        def locate(self, uv, faces, sample_uv, tol):
+            raise AssertionError("the harmonic solve must fail first")
+
+        def map_to_3d(self, vertices, faces, face_ids, barycentric):
+            raise AssertionError("the harmonic solve must fail first")
+
+    region = {
+        "region_id": "T900",
+        "region_name": "test triangle region",
+        "lm_a": "L10",
+        "lm_b": "L20",
+        "lm_c": "L30",
+        "resolution": 2,
+    }
+    reference = build_region_remesh(center_patch_mesh, triangle_landmarks, region)
+
+    result = build_region_remesh(
+        center_patch_mesh,
+        triangle_landmarks,
+        region,
+        backend=FailingCudaBackend(),
+    )
+
+    np.testing.assert_allclose(result.sample_points_3d, reference.sample_points_3d)
+    np.testing.assert_array_equal(
+        result.located_samples.unmapped_mask,
+        reference.located_samples.unmapped_mask,
+    )
 
 
 def test_compute_region_feature_values_uses_selected_landmarks(
@@ -515,6 +694,208 @@ def test_repair_unmapped_samples_salvages_low_ratio_uv_degenerate_region():
     assert np.isfinite(repaired.points_3d).all()
 
 
+def test_dense_uv_validation_distinguishes_coverage_from_3d_degeneracy():
+    faces = np.array([[0, 1, 2]], dtype=int)
+    valid_uv = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    valid_vertices = np.column_stack([valid_uv, np.zeros(3)])
+
+    passed = remesh._inspect_dense_uv_mapping(valid_uv, faces, valid_vertices, validation_resolution=4)
+    assert passed.failure_type == "pass"
+    assert passed.unmapped_count == 0
+    assert passed.degenerate_face_count == 0
+    assert passed.min_triangle_area_3d > 0.0
+
+    uncovered = remesh._inspect_dense_uv_mapping(
+        valid_uv * 0.5,
+        faces,
+        valid_vertices,
+        validation_resolution=4,
+    )
+    assert uncovered.failure_type == "r48_unmapped"
+    assert uncovered.unmapped_count > 0
+
+    collinear_vertices = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    collapsed = remesh._inspect_dense_uv_mapping(
+        valid_uv,
+        faces,
+        collinear_vertices,
+        validation_resolution=4,
+    )
+    assert collapsed.failure_type == "r48_3d_degenerate"
+    assert collapsed.unmapped_count == 0
+    assert collapsed.degenerate_face_count > 0
+    assert collapsed.min_triangle_area_3d == pytest.approx(0.0)
+
+
+def test_degenerate_uv_salvage_uses_later_valid_candidate(monkeypatch):
+    result = _uv_degenerate_salvage_result(10)
+    baseline = remesh._repair_degenerate_uv_faces(result)
+    assert baseline.degenerate_after == 0
+    rejected = replace(
+        baseline,
+        uv=result.parameterization.uv.copy(),
+        degenerate_after=1,
+        method="candidate_rejected",
+        rejection_reason="degenerate_repair_incomplete",
+    )
+    accepted = replace(baseline, method="candidate_reparameterized")
+    monkeypatch.setattr(
+        remesh,
+        "_degenerate_uv_repair_candidates",
+        lambda _result, **_kwargs: [rejected, accepted],
+    )
+    monkeypatch.setattr(
+        remesh,
+        "_repair_degenerate_uv_components",
+        lambda _result, candidate, **_kwargs: remesh.DegenerateUVComponentRepair(
+            candidate,
+            remesh.DegenerateUVComponentProfile(1, 1, False, 1),
+            attempted=False,
+        ),
+    )
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.status == "PASS"
+    assert repaired.degenerate_salvage_method == "candidate_reparameterized"
+    assert repaired.degenerate_salvage_accepted is True
+
+
+def test_small_dense_coverage_gap_eligibility_is_limited_to_18_r48_points():
+    eligible = remesh.DenseUVValidation(48, 18, 0, 0.01, "r48_unmapped")
+    too_large = remesh.DenseUVValidation(48, 19, 0, 0.01, "r48_unmapped")
+    degenerate = remesh.DenseUVValidation(48, 1, 1, 0.0, "r48_3d_degenerate")
+
+    assert remesh._is_small_dense_coverage_gap(eligible) is True
+    assert remesh._is_small_dense_coverage_gap(too_large) is False
+    assert remesh._is_small_dense_coverage_gap(degenerate) is False
+
+
+def test_degenerate_uv_salvage_accepts_valid_small_coverage_repair(monkeypatch):
+    result = _uv_degenerate_salvage_result(10)
+    baseline = remesh._repair_degenerate_uv_faces(result)
+    coverage_candidate = replace(baseline, method="local_uv_coverage_repair")
+    calls = iter((
+        remesh.DenseUVValidation(48, 2, 0, 0.01, "r48_unmapped"),
+        remesh.DenseUVValidation(48, 0, 0, 0.01, "pass"),
+    ))
+    monkeypatch.setattr(remesh, "_degenerate_uv_repair_candidates", lambda _result, **_kwargs: [baseline])
+    monkeypatch.setattr(remesh, "_inspect_dense_uv_mapping", lambda *_args, **_kwargs: next(calls))
+    monkeypatch.setattr(
+        remesh,
+        "_repair_small_dense_uv_gaps",
+        lambda _result, _candidate, _validation, **_kwargs: coverage_candidate,
+    )
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.status == "PASS"
+    assert repaired.dense_coverage_repair_attempted is True
+    assert repaired.dense_coverage_repair_accepted is True
+    assert repaired.dense_coverage_repair_before == 2
+    assert repaired.dense_coverage_repair_after == 0
+    assert repaired.degenerate_salvage_method == "local_uv_coverage_repair"
+
+
+def test_degenerate_component_profile_distinguishes_internal_from_boundary_components():
+    internal = _uv_degenerate_salvage_result(10)
+    internal_profile = remesh._profile_degenerate_uv_components(
+        internal,
+        internal.parameterization.uv,
+    )
+    assert internal_profile.component_count == 1
+    assert internal_profile.largest_component_face_count == 1
+    assert internal_profile.touches_boundary is False
+
+    template = internal.template
+    boundary_face = next(
+        face for face in template.faces
+        if any(np.isclose(template.barycentric[int(vertex_id)].min(), 0.0) for vertex_id in face)
+    )
+    boundary_uv = internal.parameterization.uv.copy()
+    boundary_uv[int(boundary_face[2])] = (
+        boundary_uv[int(boundary_face[0])] + boundary_uv[int(boundary_face[1])]
+    ) / 2.0
+    boundary = replace(
+        internal,
+        parameterization=replace(internal.parameterization, uv=boundary_uv),
+    )
+    boundary_profile = remesh._profile_degenerate_uv_components(boundary, boundary_uv)
+    assert boundary_profile.component_count >= 1
+    assert boundary_profile.touches_boundary is True
+    boundary_repair = remesh._repair_degenerate_uv_components(
+        boundary,
+        remesh.DegenerateUVRepair(
+            uv=boundary_uv,
+            degenerate_before=boundary_profile.largest_component_face_count,
+            degenerate_after=boundary_profile.largest_component_face_count,
+            method="baseline",
+        ),
+    )
+    assert boundary_repair.attempted is False
+
+
+def test_component_harmonic_repair_resolves_internal_degeneracy():
+    result = _uv_degenerate_salvage_result(10)
+    base = remesh.DegenerateUVRepair(
+        uv=result.parameterization.uv,
+        degenerate_before=1,
+        degenerate_after=1,
+        method="baseline",
+    )
+
+    repaired = remesh._repair_degenerate_uv_components(result, base)
+
+    assert repaired.profile.touches_boundary is False
+    assert repaired.attempted is True
+    assert repaired.uv_repair.degenerate_after == 0
+
+
+def test_component_harmonic_repair_checks_only_faces_changed_by_component(monkeypatch):
+    result = _uv_degenerate_salvage_result(10)
+    base = remesh.DegenerateUVRepair(
+        uv=result.parameterization.uv,
+        degenerate_before=1,
+        degenerate_after=1,
+        method="baseline",
+    )
+    monkeypatch.setattr(
+        remesh,
+        "_uv_candidate_preserves_face_quality",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("global check used")),
+    )
+
+    repaired = remesh._repair_degenerate_uv_components(result, base)
+
+    assert repaired.uv_repair.degenerate_after == 0
+
+
+def test_degenerate_salvage_records_phase_timings():
+    result = _uv_degenerate_salvage_result(10)
+
+    repaired = repair_unmapped_samples(
+        result,
+        allow_raw_fail_repair=True,
+        max_raw_fail_repair_unmapped_ratio=0.4,
+    )
+
+    assert repaired.repair_timing.degenerate_relaxation_seconds >= 0.0
+    assert repaired.repair_timing.component_repair_seconds >= 0.0
+    assert repaired.repair_timing.dense_validation_seconds >= 0.0
+    assert repaired.repair_timing.total_seconds >= (
+        repaired.repair_timing.degenerate_relaxation_seconds
+        + repaired.repair_timing.component_repair_seconds
+    )
+
+
 def test_repair_unmapped_samples_refuses_high_ratio_uv_degenerate_region():
     result = _uv_degenerate_salvage_result(7)
 
@@ -522,6 +903,7 @@ def test_repair_unmapped_samples_refuses_high_ratio_uv_degenerate_region():
         result,
         allow_raw_fail_repair=True,
         max_raw_fail_repair_unmapped_ratio=0.4,
+        max_raw_fail_repair_degenerate_ratio=0.015,
     )
 
     assert repaired.raw_status == "FAIL"

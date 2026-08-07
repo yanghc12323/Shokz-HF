@@ -14,6 +14,53 @@ import pytest
 import trimesh
 
 
+def test_remesh_backend_summary_aggregates_gpu_timing(tmp_path: Path):
+    from ear_param.pipeline import PipelineConfig, _summarize_remesh_backends
+
+    salvaged_dir = tmp_path / "salvaged"
+    salvaged_dir.mkdir()
+    for sample_tag, region_count, h2d, solve in (
+        ("MQ_S001L", 52, 0.25, 0.75),
+        ("MQ_S001R", 52, 0.50, 1.25),
+    ):
+        (salvaged_dir / f"{sample_tag}_remesh_backend.json").write_text(
+            json.dumps(
+                {
+                    "requested": "auto",
+                    "effective": "cuda",
+                    "fallback_reason": "",
+                    "gpu_peak_bytes": 1024,
+                    "gpu_timing": {
+                        "region_count": region_count,
+                        "lock_wait_seconds": 0.1,
+                        "host_to_device_seconds": h2d,
+                        "harmonic_solve_seconds": solve,
+                        "uv_lookup_seconds": 2.0,
+                        "map_to_3d_seconds": 0.5,
+                        "device_to_host_seconds": 0.25,
+                        "region_wall_seconds": 4.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    summary = _summarize_remesh_backends(
+        PipelineConfig(mesh_dir=tmp_path / "mesh", landmarks_dir=tmp_path / "landmarks", salvaged_dir=salvaged_dir)
+    )
+
+    assert summary["gpu_timing"] == {
+        "region_count": 104,
+        "lock_wait_seconds": 0.2,
+        "host_to_device_seconds": 0.75,
+        "harmonic_solve_seconds": 2.0,
+        "uv_lookup_seconds": 4.0,
+        "map_to_3d_seconds": 1.0,
+        "device_to_host_seconds": 0.5,
+        "region_wall_seconds": 8.0,
+    }
+
+
 def test_full_pipeline_output_root_scopes_every_stage(tmp_path: Path):
     from scripts.run_full_pipeline import build_parser, build_pipeline_config
 
@@ -89,7 +136,7 @@ def test_full_pipeline_only_prepares_an_explicit_output_root(
     configs = []
     written_run_dirs: list[Path] = []
     result = SimpleNamespace(
-        records=pd.DataFrame(),
+        records=pd.DataFrame({"weld": ["PASS"]}),
         pca_status="SKIPPED",
         pca_result={},
         reference_pca_status="SKIPPED",
@@ -424,7 +471,7 @@ def test_pipeline_emits_machine_readable_sample_and_stage_events(tmp_path: Path)
     )
 
 
-def test_pipeline_config_defaults_to_one_point_five_percent_degenerate_salvage_ratio(tmp_path: Path):
+def test_pipeline_config_defaults_to_three_percent_degenerate_salvage_ratio(tmp_path: Path):
     from ear_param.pipeline import PipelineConfig
 
     config = PipelineConfig(
@@ -432,7 +479,7 @@ def test_pipeline_config_defaults_to_one_point_five_percent_degenerate_salvage_r
         landmarks_dir=tmp_path / "landmarks",
     )
 
-    assert config.max_salvage_degenerate_ratio == 0.015
+    assert config.max_salvage_degenerate_ratio == 0.03
 
 
 def test_pipeline_config_defaults_match_child_salvage_and_pca_defaults(tmp_path: Path):
@@ -446,9 +493,15 @@ def test_pipeline_config_defaults_match_child_salvage_and_pca_defaults(tmp_path:
     args = build_parser().parse_args([])
     cli_config, _, _ = build_pipeline_config(args)
 
-    assert config.max_salvage_unmapped_ratio == 0.35
+    assert config.max_salvage_unmapped_ratio == 0.45
+    assert config.max_salvage_degenerate_ratio == 0.03
+    assert config.weld_warning_mm == 0.5
+    assert config.weld_fail_mm == 1.5
     assert config.pca_variance_threshold == 0.75
-    assert cli_config.max_salvage_unmapped_ratio == 0.35
+    assert cli_config.max_salvage_unmapped_ratio == 0.45
+    assert cli_config.max_salvage_degenerate_ratio == 0.03
+    assert cli_config.weld_warning_mm == 0.5
+    assert cli_config.weld_fail_mm == 1.5
     assert cli_config.pca_variance_threshold == 0.75
     assert cli_config.parallel_workers == 1
 
@@ -485,8 +538,11 @@ def test_pipeline_config_appends_new_fields_after_legacy_field_order():
             "event_log",
             "qc_figure_mode",
             "alignment_mode",
-            "parallel_workers",
-        )
+                "parallel_workers",
+                "weld_warning_mm",
+                "weld_fail_mm",
+                "remesh_backend",
+            )
 
 
 def test_pipeline_config_preserves_legacy_positional_constructor_mapping():
@@ -514,7 +570,7 @@ def test_pipeline_config_preserves_legacy_positional_constructor_mapping():
 
     for field_name, expected in zip(legacy_field_names, legacy_values, strict=True):
         assert getattr(config, field_name) == expected
-    assert config.max_salvage_unmapped_ratio == 0.35
+    assert config.max_salvage_unmapped_ratio == 0.45
     assert config.pca_variance_threshold == 0.75
 
 
@@ -596,10 +652,80 @@ def test_subprocess_remesh_receives_all_scoped_output_directories(
     pipeline.build_subprocess_stages(config).remesh_sample("T001_L")
 
     command = commands[0]
-    assert command[command.index("--mesh_out_dir") + 1] == str(config.raw_mesh_dir)
-    assert command[command.index("--repaired_mesh_out_dir") + 1] == str(config.repaired_mesh_dir)
     assert command[command.index("--salvaged_mesh_out_dir") + 1] == str(config.salvaged_mesh_dir)
+    assert "--out_dir" not in command
+    assert "--mesh_out_dir" not in command
+    assert "--repaired_out_dir" not in command
+    assert "--repaired_mesh_out_dir" not in command
     assert command[command.index("--max_salvage_unmapped_ratio") + 1] == "0.28"
+
+
+def test_subprocess_remesh_passes_original_mq_sample_tag(tmp_path: Path, monkeypatch):
+    import ear_param.pipeline as pipeline
+
+    config = pipeline.PipelineConfig(
+        mesh_dir=tmp_path / "data" / "clean_mesh",
+        landmarks_dir=tmp_path / "data" / "landmarks",
+        raw_dir=tmp_path / "raw",
+        salvaged_dir=tmp_path / "salvaged",
+    )
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], cwd: Path) -> None:
+        commands.append(command)
+        config.raw_dir.mkdir(parents=True, exist_ok=True)
+        config.salvaged_dir.mkdir(parents=True, exist_ok=True)
+        for output_dir in (config.raw_dir, config.salvaged_dir):
+            pd.DataFrame({"status": ["PASS"]}).to_csv(
+                output_dir / "MQ_S001L_remesh_qc.csv", index=False
+            )
+
+    monkeypatch.setattr(pipeline, "_run_command", fake_run)
+
+    pipeline.build_subprocess_stages(config).remesh_sample("MQ_S001L")
+
+    command = commands[0]
+    assert command[command.index("--sample-tag") + 1] == "MQ_S001L"
+
+
+def test_subprocess_weld_preserves_mq_sample_tag(tmp_path: Path, monkeypatch):
+    import ear_param.pipeline as pipeline
+
+    config = pipeline.PipelineConfig(
+        mesh_dir=tmp_path / "data" / "clean_mesh",
+        landmarks_dir=tmp_path / "data" / "landmarks",
+        weld_dir=tmp_path / "weld",
+    )
+
+    captured_commands: list[list[str]] = []
+
+    def fake_run(command: list[str], cwd: Path) -> None:
+        captured_commands.append(command)
+        config.weld_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({
+            "sample_id": ["MQ_S001"],
+            "side": ["L"],
+            "status": ["PASS"],
+            "pca_ready": [True],
+        }).to_csv(config.weld_dir / "whole_ear_weld_summary.csv", index=False)
+
+    monkeypatch.setattr(pipeline, "_run_command", fake_run)
+
+    summary = pipeline.build_subprocess_stages(config).weld_batch(["MQ_S001L"])
+
+    assert summary["sample_tag"].tolist() == ["MQ_S001L"]
+    command = captured_commands[0]
+    assert command[command.index("--weld_warning_mm") + 1] == "0.5"
+    assert command[command.index("--weld_fail_mm") + 1] == "1.5"
+
+
+def test_full_pipeline_marks_no_weld_pass_as_failed_no_valid_result():
+    from scripts.run_full_pipeline import pipeline_terminal_error, pipeline_terminal_status
+
+    result = SimpleNamespace(records=pd.DataFrame({"weld": ["ERROR", "SKIPPED"]}))
+
+    assert pipeline_terminal_status(result) == "FAILED_NO_VALID_RESULT"
+    assert "整耳拼接" in pipeline_terminal_error(result)
 
 
 def test_subprocess_remesh_qc_receives_effective_salvage_limits(monkeypatch):
@@ -1163,6 +1289,9 @@ def test_pipeline_writes_sample_timing_summary(tmp_path: Path):
         ["REMESH", "T001_L"],
         ["REMESH_QC", "T001_L"],
     ]
+    timing_text = (tmp_path / "run" / "sample_processing_time.txt").read_text(encoding="utf-8")
+    assert "T001_L" in timing_text
+    assert "总耗时" in timing_text
 
 
 def test_pipeline_timing_summary_includes_global_stage_elapsed_time(tmp_path: Path):

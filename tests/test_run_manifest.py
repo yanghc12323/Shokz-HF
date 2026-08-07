@@ -282,6 +282,39 @@ def test_finish_manifest_records_timing_summary(tmp_path: Path):
     assert saved["result"]["total_elapsed_seconds"] == 2.0
 
 
+def test_finish_manifest_records_requested_and_effective_remesh_backend(tmp_path: Path):
+    from ear_param.pipeline import PipelineResult
+    from ear_param.run_manifest import finish_manifest, write_manifest
+
+    path = tmp_path / "manifest.json"
+    write_manifest(path, {
+        "status": "RUNNING",
+        "finished_at": None,
+        "result": None,
+        "error": "",
+        "parameters": {"remesh_backend_requested": "auto"},
+        "runtime": {},
+    })
+    result = PipelineResult(
+        records=pd.DataFrame(),
+        pca_status="SKIPPED",
+        pca_result={},
+        remesh_backend_summary={
+            "requested": "auto",
+            "effective": "cpu",
+            "fallback_reason": "CuPy unavailable",
+            "gpu_peak_bytes": 0,
+        },
+    )
+
+    saved = finish_manifest(path, status="COMPLETED", result=result)
+
+    assert saved["parameters"]["remesh_backend_requested"] == "auto"
+    assert saved["parameters"]["remesh_backend_effective"] == "cpu"
+    assert saved["parameters"]["remesh_backend_fallback_reason"] == "CuPy unavailable"
+    assert saved["runtime"]["remesh_backend"]["gpu_peak_bytes"] == 0
+
+
 def test_finish_manifest_records_top_level_error(tmp_path: Path):
     from ear_param.run_manifest import finish_manifest, write_manifest
 

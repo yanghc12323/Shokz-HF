@@ -25,11 +25,25 @@ script_output.txt
 # Project-specific: generated output (kept locally, not in repo)
 output/
 data/clean_mesh/
+data/landmarks/*.csv
 .agents/
 .planning/
 .worktrees/
 .test_artifacts/
 .docx_review/
+
+# Local deployment packages and research assets (kept outside source control)
+offline_wheels/
+reports/
+landmark重映射/
+重点耳朵截图/
+*.pptx
+构建exe输出.txt
+
+# Local agent/tool caches
+.codex_tmp/
+.superpowers/
+.codex/
 
 # Project-specific: reference documents and binaries
 *.pdf

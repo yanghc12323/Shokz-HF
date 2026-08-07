@@ -1,9 +1,9 @@
 from scripts.visualize_remesh_qc import figure_layers_for_mode
 
 
-def test_figure_layers_for_mode_only_renders_repaired_failures_when_requested():
-    assert figure_layers_for_mode("all", "PASS") == {"raw", "repaired", "salvaged"}
-    assert figure_layers_for_mode("repaired-fail", "FAIL") == {"repaired"}
+def test_figure_layers_only_renders_salvaged_qc_figures():
+    assert figure_layers_for_mode("all", "PASS") == {"salvaged"}
+    assert figure_layers_for_mode("repaired-fail", "FAIL") == {"salvaged"}
     assert figure_layers_for_mode("repaired-fail", "PASS") == set()
     assert figure_layers_for_mode("none", "FAIL") == set()
 

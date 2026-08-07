@@ -1,580 +1,179 @@
-﻿# 3D Ear Cross-Parameterisation with Patch-Based Remesh
+# Shokz 耳廓降采样与形态分析（CLI）
 
-> 当前主线：论文式 patch-based remesh
-> 当前阶段：MQ 命名输入、W2-W3 全流程、并行 Remesh/QC 与桌面软件已集成；固定参考耳为 `MQ_S076L`。
-> 更新时间：2026-07-22
+本仓库是面向 Windows 工作站的命令行分析工具。它将带有 35 个标点的耳廓 PLY 网格统一到 canonical 左耳坐标系，按 Region 重参数化为固定 r24 拓扑，执行质量控制与整耳拼接，最后输出固定参考耳或 GPA 配准后的平均耳、PCA、主成分极值形态和探索性聚类结果。
 
-## 1. 项目目标
+本项目仅保留 CLI 工作流；不再提供桌面应用或 EXE 构建功能。
 
-本项目用于把不同受试者的 3D 耳模型转换为可跨样本统计分析的统一表达。原始 mesh 的顶点数量、面片拓扑和局部形态都不一致，不能直接堆叠后做 PCA。因此当前采用论文式 patch-based remesh 路线：
+## 1. 仓库边界
 
-```text
-原始耳朵 mesh
-  + landmark 标注
-  + region_table 三角选区
-  -> 局部 patch 提取
-  -> harmonic UV 参数化到标准 2D 三角域
-  -> 固定 2D subdivision 降采样
-  -> 映射回 3D
-  -> 输出同点序、同面片模板的 remesh patch
-```
+纳入版本控制的内容：
 
-这样每个合格样本、每个合格区域都有相同点数、相同点序、相同 template faces，可用于后续 PCA、平均耳和形态特征分析。
+- ear_param/：重参数化、质控、拼接、配准、PCA 与形态分析核心；
+- scripts/：可直接调用的 CLI 入口；
+- config/region_table.csv：当前 Region 定义；
+- tests/：算法与 CLI 回归测试；
+- docs/：CLI、GPU 和方法说明；
+- requirements.txt 与 requirements-gpu.txt：CPU 必需依赖及可选 GPU 依赖。
 
-## 2. 当前真实数据状态
+不纳入版本控制的内容：
 
-原始输入样本以 `data/clean_mesh/` 与 `data/landmarks/` 中成对存在的文件为准。当前目录可发现 132 条 mesh/landmark 记录；实际运行时以每次 `manifest.json` 中 `discovery=READY` 的条目为准。
+- 真实 PLY 网格、landmark CSV、运行输出、离线 wheel、汇报材料、截图、报告渲染缓存和 landmark 重映射资料；
+- 这些文件可保留在本地或数据归档盘，但不得执行 git add -f 纳入代码仓库。
 
-> 历史验证记录：下列 `T###_L` 是旧数据命名和早期 28 样本快照，仅用于保留当时的 QC/PCA 证据；当前正式输入以 `MQ_S###L/R` mesh 与对应 `T###_L/R_landmarks.csv` 的自动匹配为准。
+## 2. 环境安装
 
-```text
-T001_L, T002_L, T003_L, T004_L, T005_L, T006_L, T007_L,
-T008_L, T009_L, T010_L, T013_L, T049_L, T052_L, T054_L,
-T057_L, T058_L, T061_L, T065_L, T066_L, T068_L, T069_L,
-T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
-```
+要求：Windows 10/11、Python 3.11+，建议使用独立虚拟环境。
 
-当前 `config/region_table.csv` 包含 15 个三角 region，每个 region 当前 `resolution=24`，即每区 325 个 template 点、576 个 template faces。正式整耳输入采用 `salvaged` 层，再由独立 `weld_repaired` 层完成保守共享边修补。
+~~~
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+~~~
 
-当前已完成 W2 salvage、Weld 和刚体对齐门禁的仍是 12 个历史处理样本，其中 11 个为 PCA-ready，`T049_L` 为 Weld FAIL。其余原始配对样本尚待本轮全流程批处理验证；原始配对存在不等于可以进入 PCA。
+如果 PowerShell 禁止执行激活脚本，可始终直接使用 .\.venv\Scripts\python.exe，无需激活虚拟环境。
 
-## 3. 当前 W2 进展
+### 可选：GPU Remesh 加速
 
-W2 任务是：
+GPU 仅用于 Region 参数化中的部分数值计算；CPU 仍负责网格读取、最短路径、QC、拼接、配准和 PCA。安装与离线部署见 [GPU_ACCELERATION_OFFLINE.md](docs/GPU_ACCELERATION_OFFLINE.md)。
 
-> 参考论文明确耳朵模型需求形态以及划分选区的特征点，将划分的三维三角区域投影至二维平面，进行降采样处理，限定每一区域的采样点数量相同，并根据选取的特征点计算相关特征值。
+~~~
+.\.venv\Scripts\python.exe -m pip install -r requirements-gpu.txt
+.\.venv\Scripts\python.exe -c "from ear_param.remesh_backend import backend_diagnostics; print(backend_diagnostics('auto'))"
+~~~
 
-当前已经实现：
+若诊断结果中 effective 为 cuda，即可在全流程命令中使用 --remesh-backend auto。当 CUDA 局部计算不可用时，auto 会回退到 CPU；如需完全 CPU 基线，显式使用 --remesh-backend cpu。
 
-1. landmark 吸附到 mesh 顶点。
-2. mesh 顶点图构建。
-3. 三个 landmark 之间的最短边界路径。
-4. 边界限定 patch face 提取。
-5. patch 局部子网格构建。
-6. harmonic UV 参数化到标准 2D 三角域。
-7. 标准 2D 三角域固定 subdivision 降采样。
-8. 2D 采样点定位到源 UV face，并映射回 3D。
-9. 使用 `sample_points_3d + template.faces` 组装 remesh patch。
-10. 输出 points/faces/features/QC/PLY。
-11. 输出每个 region 的 QC 可视化图。
+## 3. 输入要求
 
-结论：代码层面 W2 主流程已经可运行；当前主要工作不是继续堆功能，而是用真实样本验证 region table 的稳定性，并修正不稳定 region。
+### 3.1 网格
 
-## 4. 安装依赖
+将清理后的 PLY 网格放入自行指定的数据目录，例如：
 
-### Windows 桌面软件
+~~~
+data/
+  clean_mesh/
+    MQ_S001L.ply
+    MQ_S001R.ply
+    MQ_S076L.ply
+~~~
 
-安装桌面依赖后，可在开发环境启动中文工程工作台：
+样本标签为 MQ_S###L 或 MQ_S###R。L/R 是原始侧别，不表示最终分析坐标：右耳会在进入重参数化前沿 X 轴镜像，并反转三角面绕序，得到 canonical 左耳坐标；原始输入不会被改写。
 
-```powershell
-python -m pip install -r requirements-desktop.txt
-python -m desktop_app
-```
+### 3.2 Landmark
 
-构建可双击启动的 Windows 程序：
+landmark 文件名使用 T###_L_landmarks.csv 或 T###_R_landmarks.csv，并与网格样本按编号和侧别匹配。例如：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_desktop.ps1
-```
+~~~
+data/
+  landmarks/
+    T001_L_landmarks.csv
+    T001_R_landmarks.csv
+    T076_L_landmarks.csv
+~~~
 
-详细流程见 `docs/桌面工程软件使用说明.md`。原有 CLI 命令仍是分析基线，保持可用。
+每个样本必须具有当前 Region Table 所需的 35 个 landmark。CLI 会自动将 MQ_S001L 映射到 T001_L_landmarks.csv；如名称或侧别不能配对，样本会在预检中被记录为不可运行。
 
-在 VSCode 中打开项目根目录 `D:\YHC\人头项目` 后，打开 Terminal，运行：
-
-```powershell
-pip install -r requirements.txt
-```
+### 3.3 Region Table
 
-当前依赖：
+config/region_table.csv 是唯一正式 Region 配置。当前版本共 54 个 Region，全部采用 r24 采样模板。若需要修改 Region 或 landmark 边界，应修改配置文件并重新运行；不要在单次输出中手工修改中间结果。
 
-```text
-numpy
-pandas
-scipy
-trimesh
-matplotlib
-```
+## 4. 一键全流程
 
-## 5. 运行 W2 Remesh
+以下是推荐的 Windows PowerShell 命令。它会依次执行：输入发现与 canonical 化 → Remesh/QC → 整耳拼接与边界修复 → 刚体配准 → PCA、平均耳、极值形态与聚类。
 
-> 历史开发命令：本节至第 13 节中的 `T###_L` 单样本命令、QC 数字与旧输出路径用于保留早期验证过程。当前 MQ 数据的正式运行请使用第 16 节的全流程命令；不要把旧 T 标签或旧 `output/...` 目录作为新批次输入。
+~~~
+.\.venv\Scripts\python.exe scripts\run_full_pipeline.py --mesh_dir data\clean_mesh --landmarks_dir data\landmarks --regions config\region_table.csv --parallel-workers 6 --remesh-backend auto --alignment-mode fixed-reference --reference-sample MQ_S076L --qc-figure-mode repaired-fail --output-root output\runs\mq_full_YYYYMMDD
+~~~
 
-### 单样本运行
-
-```powershell
-python scripts/parameterize_ear_remesh.py --sample_id T013 --side L --mesh data/clean_mesh/T013_L.ply --landmarks data/landmarks/T013_L_landmarks.csv
-python scripts/parameterize_ear_remesh.py --sample_id T076 --side L --mesh data/clean_mesh/T076_L.ply --landmarks data/landmarks/T076_L_landmarks.csv
-python scripts/parameterize_ear_remesh.py --sample_id T077 --side L --mesh data/clean_mesh/T077_L.ply --landmarks data/landmarks/T077_L_landmarks.csv
-python scripts/parameterize_ear_remesh.py --sample_id T078 --side L --mesh data/clean_mesh/T078_L.ply --landmarks data/landmarks/T078_L_landmarks.csv
-```
-
-### PowerShell 批量运行
-
-```powershell
-$samples = "T013","T076","T077","T078"
-foreach ($s in $samples) {
-  python scripts/parameterize_ear_remesh.py --sample_id $s --side L --mesh "data/clean_mesh/${s}_L.ply" --landmarks "data/landmarks/${s}_L_landmarks.csv"
-}
-```
-
-批量运行时，每个样本结束都会扫描当前输出目录中的所有 `*_remesh_qc.csv`，并在终端最后打印按样本汇总表。跑完最后一个样本后，终端末尾会看到类似：
-
-```text
-[Remesh] Raw sample summary:
-sample_tag  PASS  WARNING  FAIL  TOTAL
-    T013_L     8        5     2     15
-    T076_L     7        6     2     15
-
-[Remesh] Repaired sample summary:
-sample_tag  PASS  WARNING  FAIL  TOTAL
-    T013_L    13        0     2     15
-    T076_L    12        0     3     15
-
-[Remesh] Salvaged sample summary:
-sample_tag  PASS  WARNING  FAIL  TOTAL
-    T013_L    14        0     1     15
-    T076_L    13        0     2     15
-```
-
-默认参数：
-
-```text
---regions config/region_table.csv
---out_dir output/parameterized_points_r24/raw
---mesh_out_dir output/remesh_r24/raw
---repaired_out_dir output/parameterized_points_r24/repaired
---repaired_mesh_out_dir output/remesh_r24/repaired
---salvaged_out_dir output/parameterized_points_r24/salvaged
---salvaged_mesh_out_dir output/remesh_r24/salvaged
---max_salvage_unmapped_ratio 0.35
---max_salvage_degenerate_ratio 0.015
-```
-
-输出文件：
-
-```text
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
-output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/salvaged/<sample>_<side>_remesh_qc.csv
-output/remesh_r24/raw/<sample>_<side>/<region_id>_remesh.ply
-output/remesh_r24/repaired/<sample>_<side>/<region_id>_remesh_repaired.ply
-output/remesh_r24/salvaged/<sample>_<side>/<region_id>_remesh_salvaged.ply
-```
-
-说明：raw PLY 只导出原始 PASS 区域；repaired PLY 允许 raw WARNING 在补点成功后导出；salvaged 层会在不改变 raw/repaired 语义的前提下，对满足安全限制的 raw FAIL 尝试少量修补并单独导出。
-
-当前 salvage 安全限制：
-
-```text
-raw unmapped ratio > --max_salvage_unmapped_ratio：不 salvage
-raw degenerate ratio > --max_salvage_degenerate_ratio：不尝试 UV 修补
-默认 --max_salvage_unmapped_ratio = 0.35
-默认 --max_salvage_degenerate_ratio = 0.015（1.5%）
-退化面数量不设绝对门槛；比例合格后在 salvaged 层做局部 UV 修补
-salvage_accepted=True 必须同时满足：无 unmapped、degenerate_after=0、r24 最终面有效、r48 加密覆盖验证通过
-```
+参数说明：
 
-## 6. 运行 QC 可视化
-
-生成所有当前样本、所有 region 的 QC 图：
-
-```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L
-```
-
-只诊断重点问题区域：
-
-```powershell
-python scripts/visualize_remesh_qc.py --samples T013_L T076_L T077_L T078_L --region_ids T001 T002 T009
-```
-
-输出：
-
-```text
-output/qc_visualizations_r24/raw/<sample_tag>/<region_id>_qc.png
-output/qc_visualizations_r24/raw/qc_visualization_summary.csv
-output/qc_visualizations_r24/repaired/<sample_tag>/<region_id>_qc.png
-output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
-output/qc_visualizations_r24/salvaged/<sample_tag>/<region_id>_qc.png
-output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
-```
-
-每个 region 会输出三张 QC 图：
-
-1. `raw` 图：显示未修补前的原始映射结果，右侧红色叉号为 raw unmapped template 点。
-2. `repaired` 图：显示修补后的结果，右侧橙色三角为 repaired 点，红色叉号为仍未修补点。
-3. `salvaged` 图：显示对 raw FAIL 进行保守 salvage 后的结果；若进行了 UV 退化修补，标题会显示 `degenerate=修补前->修补后`，右侧显示修补后的 UV 图。
-
-三张图左侧都显示 3D patch faces、三条 landmark boundary path 和三个 landmark 点；右侧都显示 2D UV patch 与固定 template samples。
-
-这些图用于判断 region 失败到底是 landmark 组合问题、边界最短路径问题、patch 过窄问题，还是 UV 覆盖问题。
-
-## 7. 当前 QC 结果
-
-`scripts/parameterize_ear_remesh.py` 与 `scripts/visualize_remesh_qc.py` 使用同一套 raw PASS/WARNING/FAIL 判定规则。统一规则为：无 unmapped 且无 degenerate 为 PASS；少量 unmapped 为 WARNING；unmapped 比例超过 20% 或存在 degenerate face 为 FAIL。
-
-repaired 层只处理 raw WARNING：标准三角形角点 unmapped 优先用对应吸附 landmark 替换，其余少量 unmapped 点用模板网格上的平滑插值填补。salvaged 层在相同修补算法基础上，额外允许原始退化比例不超过 1.5% 的 raw FAIL 尝试局部 UV 修补，再重新映射与补点；不会新增第四层输出。
-
-当前 QC 结果不要再以旧四样本静态表为准，应直接读取最新输出：
-
-```text
-output/parameterized_points_r24/raw/<sample>_L_remesh_qc.csv
-output/parameterized_points_r24/repaired/<sample>_L_remesh_qc.csv
-output/parameterized_points_r24/salvaged/<sample>_L_remesh_qc.csv
-output/qc_visualizations_r24/raw/qc_visualization_summary.csv
-output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
-output/qc_visualizations_r24/salvaged/qc_visualization_summary.csv
-```
-
-当前判断：
-
-1. 已就位样本都可以通过同一条 CLI 运行并产出 points/faces/features/QC。
-2. r24 输出保持每个 region 325 点、576 面。
-3. 当前已新增 salvaged 层，用于记录 raw FAIL 是否能被保守修补。
-4. `degenerate_faces` 始终记录原始 source UV 退化数；salvaged 是否可用必须看 `degenerate_after`。只有 `degenerate_after=0` 且 `salvage_accepted=True` 才可继续进入整耳。
-5. 当前仍不建议盲目放宽 QC 或直接进入正式 W3 PCA。
-
-## 8. 当前处理策略
-
-当前按以下优先级推进：
-
-```text
-T0：继续用真实样本验证 region table 的稳定性。
-T1：调整 region table，尝试增加 region、拆分 region、替换不稳定 landmark 组合。
-T2：在确认 region 定义合理后，再考虑边界路径策略、patch 选择策略或参数调整。
-```
-
-具体原则：
-
-1. 先对比同一样本、同一区域的 raw / repaired / salvaged 三张图。
-2. raw FAIL 先看 `salvage_rejection_reason`：`degenerate_ratio` 表示原始退化比例超过 1.5%，`unmapped_ratio` 表示未映射比例超过 0.35；二者都不进入自动 salvage。
-3. 对反复失败的共享边，周一继续推进人工 M 点方案，用解剖控制点约束最短路径。
-4. 不把 `WARNING` 或 `FAIL` 区域直接填 NaN 后做 PCA。
-5. W3 不再直接读取独立 region；只使用整耳焊接 `pca_ready=True` 且刚体对齐 `status=PASS` 的样本。
-
-## 9. 输出文件说明
-
-### remesh points
-
-路径：
-
-```text
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_points.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_points.csv
-```
-
-关键字段：
-
-| 字段 | 含义 |
+| 参数 | 作用 |
 |---|---|
-| `region_id` | 区域编号 |
-| `region_point_id` | 区域内部固定点序 |
-| `lambda_a/lambda_b/lambda_c` | 标准三角域重心坐标 |
-| `u/v` | 标准 2D 参数坐标 |
-| `source_face_index` | 该点落入的源 UV face |
-| `is_unmapped` | 是否未成功映射 |
-| `x/y/z` | 映射回 3D 后的坐标 |
+| --parallel-workers N | 同时运行的样本数。0 为自动；应根据 CPU 核数、内存和单个网格规模调整。CPU/内存已接近饱和时不应继续增大。 |
+| --remesh-backend cpu\|auto\|cuda | cpu 为严格 CPU 基线；auto 优先用 CUDA 并允许局部 CPU 回退；cuda 要求 GPU 后端可用。 |
+| --alignment-mode fixed-reference | 将所有通过 Weld 的样本刚体配准到指定参考耳。 |
+| --reference-sample MQ_S076L | 固定参考耳。必须存在并通过 Weld；可按研究设计改为其他合格样本。 |
+| --alignment-mode gpa | 改用广义 Procrustes 分析（GPA）共同配准。 |
+| --qc-figure-mode all | 为所有 Region 导出 QC PNG，最慢。 |
+| --qc-figure-mode repaired-fail | 仅为修复后仍失败的 Region 导出 QC PNG，推荐正式批处理使用。 |
+| --qc-figure-mode none | 不导出 QC PNG，仅保留 CSV、manifest 和日志。 |
+| --output-root | 本轮唯一输出目录；目录必须在启动前不存在或为空，避免与旧运行混合。 |
+| --skip-pca | 仅完成 Remesh、拼接和配准，不运行 PCA。 |
+| --samples MQ_S001L MQ_S001R | 仅运行指定样本，适用于复核或重跑。 |
 
-W3 必须使用 `region_id + region_point_id` 对齐不同样本的点。
+完整参数：
 
-### remesh faces
+~~~
+.\.venv\Scripts\python.exe scripts\run_full_pipeline.py --help
+~~~
 
-路径：
+## 5. 运行状态与质量门禁
 
-```text
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_faces.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_faces.csv
-```
+每个样本依次接受以下门禁：
 
-faces 是固定 template faces。W3 不应重新 triangulate。
+1. 输入预检：网格、landmark、Region Table 是否存在且可配对；
+2. Remesh/QC：每个 Region 的 r24 点位、UV 覆盖、退化面及修复/Salvage 状态；
+3. Weld：Region 共边界一致性、全局面拓扑和面朝向；
+4. Alignment：仅对 Weld 通过的整耳执行 GPA 或固定参考耳刚体配准；
+5. PCA：仅纳入拓扑一致且 PCA-ready 的对齐样本。
 
-### region features
+PASS 表示可进入下一阶段；WARNING 表示有可审计的轻度问题；FAIL 表示当前结果不应进入后续统计；ERROR 表示样本级脚本异常，应优先查看该轮日志和 manifest。单个 Region 的 FAIL 不一定导致进程异常，但会影响整耳 Weld 和 PCA 入组。
 
-路径：
+## 6. 输出结构
 
-```text
-output/parameterized_points_r24/raw/<sample>_<side>_region_features.csv
-```
+使用 --output-root output\runs\<run_name> 时，所有产物被隔离在同一轮目录中。主要目录如下：
 
-该表记录 landmark 三角形边长、周长、面积、内角、质心、法向和 landmark 吸附距离，满足 W2 “根据选取的特征点计算相关特征值”的交付要求。
+~~~
+<run_name>/
+  manifest.json                         本轮输入、参数、代码状态和最终摘要
+  pipeline_summary.csv                  每样本跨阶段状态
+  sample_timings.txt                    每个样本的处理时长
+  canonical_inputs_r24/                 canonical 化后的输入副本及审计信息
+  parameterized_points_r24/
+    salvaged/                           最终用于后续步骤的 points、faces、QC CSV 与后端诊断
+  remesh_r24/salvaged/                  Region 重网格 PLY
+  qc_visualizations_r24/                按选择的档位输出 QC PNG 与汇总 CSV
+  whole_ear_r24/
+    weld_repaired/                      拼接整耳 PLY、Weld QC 与拓扑审计
+    aligned_reference_<reference>/      固定参考耳配准结果
+  pca_reference_<reference>_r24/        平均耳、PCA score、主成分形态
+    pca_morphology/                     聚类、极端个体和类别平均耳
+~~~
 
-### QC
+当前正式批处理只完整保留 salvaged 层的几何与点位输出。raw/repaired 状态信息保留在最终 QC 记录、汇总表和 manifest 中，避免为每个样本重复写入大量中间 PLY/CSV。
 
-路径：
+PCA 形态分析目录中的关键文件：
 
-```text
-output/parameterized_points_r24/raw/<sample>_<side>_remesh_qc.csv
-output/parameterized_points_r24/repaired/<sample>_<side>_remesh_qc.csv
-output/qc_visualizations_r24/raw/qc_visualization_summary.csv
-output/qc_visualizations_r24/repaired/qc_visualization_summary.csv
-```
+- mean_whole_ear.ply：全部 PCA 入组样本的平均耳；
+- scores.csv：每个样本的 PCA score；
+- pc_modes/PC01_plus_2sd.ply 等：PC1、PC2 的 ±2 SD 形态；
+- pca_morphology/cluster_k_selection.csv：候选簇数的 silhouette 比较；
+- pca_morphology/cluster_assignments.csv：样本所属簇与 PCA score；
+- pca_morphology/cluster_means/Cluster_XX_mean.ply：各簇平均耳。
 
-建议进入 W3 的最低条件：
+## 7. 单阶段命令
 
-```text
-status == PASS
-sample_point_count == expected_point_count
-unmapped_count == 0
-degenerate_after == 0（salvaged QC；旧输出没有此列时退回检查 degenerate_faces）
-```
+一般应优先运行全流程。以下入口仅用于定位问题或对既有结果做单阶段复核：
 
-## 10. 构建整耳并统一坐标系
+~~~
+.\.venv\Scripts\python.exe scripts\parameterize_ear_remesh.py --help
+.\.venv\Scripts\python.exe scripts\build_whole_ear.py --help
+.\.venv\Scripts\python.exe scripts\align_whole_ear.py --help
+.\.venv\Scripts\python.exe scripts\build_average_ear.py --help
+~~~
 
-正式输入固定为 W2 `salvaged` 层。全局模板按 landmark 身份和共享 landmark 边建立，不按三维距离猜测合并点；当前模板每个样本固定为 4453 个唯一顶点、8640 个三角面和 17 条共享边。每个 region 的局部面必须与其 resolution 对应的标准细分模板逐面一致，否则整耳直接标记为 FAIL。`salvaged` 是不可改写的基线证据；正式 PCA 输入来自其后的独立 `weld_repaired` 层。
+## 8. 验证与开发
 
-先构建整耳并运行焊接 QC：
-
-```powershell
-python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --out_dir output/whole_ear_r24/salvaged
-```
-
-再建立保守的共享边修补层。它只修补局部 WARNING：双方均为修补点、连续长度不超过 2、存在可信锚点且投影回原始 mesh 后冲突不超过 0.25 mm。通常两侧 raw 状态均不能为 FAIL；唯一例外是低比例 UV 退化已在 salvaged 层完成修补并记录 `degenerate_salvage_accepted=True`、`degenerate_after=0` 的 region。未完成该严格验收的 raw FAIL 仍不会被放行。
-
-```powershell
-python scripts/build_whole_ear.py --input_dir output/parameterized_points_r24/salvaged --regions config/region_table.csv --mesh_dir data/clean_mesh --enable_edge_repair --out_dir output/whole_ear_r24/weld_repaired
-```
-
-最后对 `weld_repaired` 中 `PCA_READY` 整耳做刚体 Generalized Procrustes / Kabsch：
-
-```powershell
-python scripts/align_whole_ear.py --whole_ear_dir output/whole_ear_r24/weld_repaired --landmarks_dir data/landmarks --out_dir output/whole_ear_r24/aligned_weld_repaired
-```
-
-焊接 QC 区分两类距离：
-
-1. `max_replacement_distance_mm`：一侧是原始 mapped、另一侧是 salvaged 修补点时，用 mapped 边界替换修补边界所需的位移；它被完整记录，但不等同于可靠边界冲突。
-2. `max_conflict_distance_mm`：两侧同为 mapped，或两侧都没有 mapped 权威坐标时的差异；PASS/WARNING/FAIL 使用该值判断，默认阈值为 0.25/1.00 mm。
-
-当前 `weld_repaired` whole-ear 结果：
-
-```text
-PASS / PCA_READY: T013_L, T066_L, T068_L, T069_L, T076_L, T077_L, T078_L, T088_L, T094_L, T097_L, T099_L
-FAIL:             T049_L（L13-L17 邻接 T003 raw FAIL，自动修补被拒绝）
-```
-
-T066_L、T094_L 和 T097_L 的 baseline WARNING 已在独立 `weld_repaired` 层经过保守共享边修补后转为 PASS。11 个 `PCA_READY` 样本均已完成刚体对齐，GPA 均收敛，所有 `det(R)=1`，最大 mesh 边长保持误差约为 `1.84e-14 mm`。
-
-## 11. 当前主线文件
-
-| 文件 | 作用 |
-|---|---|
-| `ear_param/remesh.py` | 论文式 remesh 核心算法 |
-| `ear_param/qc_visualization.py` | remesh QC 可视化 |
-| `scripts/parameterize_ear_remesh.py` | W2 remesh 命令行入口 |
-| `scripts/visualize_remesh_qc.py` | QC 可视化命令行入口 |
-| `ear_param/whole_ear.py` | 全局模板、共享边坐标选择与焊接 QC |
-| `scripts/build_whole_ear.py` | 整耳构建、共享边修补、PLY/CSV/QC 图批处理入口 |
-| `ear_param/alignment.py` | 刚体 Kabsch、GPA 与固定参考耳对齐 |
-| `scripts/align_whole_ear.py` | GPA 或固定参考耳的整耳坐标统一与对齐 QC 入口 |
-| `ear_param/pca_average.py` | W3 输入门禁、PCA、平均耳与模式网格导出 |
-| `ear_param/pca_morphology.py` | PCA 后处理：极值形态、真实极值被试、自动聚类、极端个体与图形产物 |
-| `scripts/build_average_ear.py` | W3 PCA 与平均耳命令行入口 |
-| `docs/W2 Remesh 使用说明.md` | W2 使用说明 |
-| `docs/整耳全局模板、边界焊接与刚体统一坐标系.md` | 整耳焊接与坐标统一说明 |
-| `docs/0711-Remesh QC 可视化与 Region Table 优化策略.md` | QC 与 region table 优化策略 |
-| `docs/W3 PCA 与平均耳技术路线.md` | W3 PCA 平均耳技术路线 |
-
-## 12. 项目范围
-
-本仓库仅保留论文式 patch-based remesh、W2 质量控制、整耳焊接、共享边修补和刚体坐标统一主线。早期 KDTree 参数化采样路线及其旧命令行、模拟数据、可视化、校验脚本和测试已移除；它们不能作为 remesh 失败时的回退方案，也不能作为 W3 PCA 输入。
-
-`docs/archive/` 仅保存阶段性汇报和开发实施记录，方便追溯，不应作为当前流程的使用说明或 AI 实现依据。当前项目规范以 README、W2 使用说明、整耳 Weld/坐标说明、W3 技术路线和 GPA/T076 对比文档为准。
-
-当前通用的二维标准三角形采样网格由 `ear_param/remesh.py` 直接维护，仍保持每个 resolution 的固定点数与点序。
-
-## 13. 测试
-
-运行当前主线测试：
-
-```powershell
+~~~
+python -m compileall -q ear_param scripts
 python -m pytest tests -q
-```
+git diff --check
+git status --short
+~~~
 
-当前验证结果：
+## 9. 相关说明
 
-```text
-66 passed
-```
-
-备注：可能出现 `.pytest_cache` warning，这是本地缓存目录问题，不影响测试通过。
-
-## 14. W3 PCA 与平均耳
-
-### 正式全流程批处理
-
-批处理以左耳 `L` 为标准侧：L 输入不变；R 输入在 remesh 前沿默认 X 轴镜像，并反转三角面绕序。原始输入不改写。桌面隔离正式批处理将标准化 PLY、landmark 与审计 JSON 保存于 `<output-root>/canonical_inputs_r24/`；未传 `--output-root` 的 legacy CLI 模式才保存于 `output/canonical_inputs_r24/`。R 样本仍保留 `_R` 标签，但其几何已处于 canonical L 坐标系。
-
-扫描 `data/clean_mesh/` 与 `data/landmarks/` 中所有同名配对样本，并依次运行 remesh、salvage、整耳 Weld repair、GPA 对齐与 GPA-PCA：
-
-```powershell
-python scripts/run_full_pipeline.py
-```
-
-每个样本的错误不会中断其他样本。终端会显示阶段进度和最终总表；同一批的 CSV 与日志保存在 `output/pipeline_runs/<时间戳>/`。完整区域级 QC 图会显著增加运行时间；日常快速复核可显式跳过绘图：
-
-```powershell
-python scripts/run_full_pipeline.py --skip-remesh-qc
-```
-
-默认不使用 `--skip-remesh-qc` 时，只要 remesh 阶段已完成，都会生成 raw、repaired、salvaged 三层 region QC 图；这也包括 `salvaged=FAIL` 的样本，便于定位失败区域。`salvaged=FAIL` 仍会被严格阻止进入 Weld、刚体对齐和 PCA。
-
-如需同时保留固定参考耳坐标系下的独立 PCA 分支，指定一个已通过 Weld 的参考样本。该命令仍会运行 GPA-PCA；两条分支分别写入独立目录，绝不混合输入：
-
-```powershell
-python scripts/run_full_pipeline.py --reference-sample MQ_S076L
-```
-
-### 桌面软件的隔离运行
-
-桌面软件启动正式批处理时必须使用隔离模式，避免与旧的共享 `output/...` 目录互相覆盖。`--output-root` 是 opt-in 参数：只有显式传入才启用；目标目录必须不存在，或完全为空（不能含任何文件或子目录）。进程认领该目录时会原子创建 `<output-root>/.pipeline-reservation`；若进程崩溃，该标记会有意保留并使目录保持非空，下一次必须改用新的运行目录。正式运行使用：
-
-```powershell
-python scripts/run_full_pipeline.py `
-  --parallel-workers 4 `
-  --alignment-mode fixed-reference `
-  --reference-sample MQ_S076L `
-  --output-root output/runs/mq_full_20260722
-```
-
-上面命令未另传 `--run_dir`，因此该 `output-root` 同时容纳所有 canonical、W2、QC、Weld、Alignment、PCA、汇总、日志和 manifest 产物：
-
-```text
-<output-root>/
-  .pipeline-reservation
-  manifest.json
-  pipeline_batch_summary.csv
-  pipeline_run_summary.csv
-  pipeline_run.log
-  canonical_inputs_r24/
-  parameterized_points_r24/{raw,repaired,salvaged}/
-  remesh_r24/{raw,repaired,salvaged}/
-  remesh_qc_r24/
-  whole_ear_r24/{weld_repaired,aligned_gpa,aligned_reference_MQ_S076L}/
-  pca_gpa_r24/
-  pca_reference_MQ_S076L_r24/
-```
-
-固定参考耳目录名跟随实际的 `--reference-sample`：隔离模式使用 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`。当前正式参考耳为 `MQ_S076L`，对应 `aligned_reference_MQ_S076L` 与 `pca_reference_MQ_S076L_r24`。
-
-不传 `--output-root` 时，所有阶段继续使用原有固定 `output/...` 目录；`--run_dir` 仍只控制批次汇总目录，不会重定向各阶段输出，旧命令与 `--run_dir` 工作流保持不变。传入 `--output-root` 时只能省略 `--run_dir`，或让两者解析为同一路径；不同的 `--run_dir` 会被拒绝，manifest、CSV 汇总、日志和全部阶段产物都必须位于同一隔离根。桌面软件必须传 `--output-root`，不能依赖旧的共享输出模式。
-
-W3 不应再读取原始高密度 mesh，也不应重新做 remesh。正式整耳 PCA 的可信输入必须与运行模式对应。
-
-桌面软件隔离模式（传入 `--output-root`）读取：
-
-```text
-<output-root>/whole_ear_r24/aligned_gpa/<sample>_aligned_whole_ear_points.csv
-<output-root>/whole_ear_r24/aligned_gpa/<sample>_aligned_whole_ear_faces.csv
-<output-root>/whole_ear_r24/aligned_gpa/alignment_qc_summary.csv
-
-<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/<sample>_aligned_whole_ear_points.csv
-<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/<sample>_aligned_whole_ear_faces.csv
-<output-root>/whole_ear_r24/aligned_reference_MQ_S076L/alignment_qc_summary.csv
-```
-
-未传 `--output-root` 的 legacy CLI 模式才读取原有固定路径：
-
-```text
-output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_points.csv
-output/whole_ear_r24/aligned_weld_repaired/<sample>_aligned_whole_ear_faces.csv
-output/whole_ear_r24/aligned_weld_repaired/alignment_qc_summary.csv
-```
-
-其中 legacy CLI 的固定参考耳分支对应读取：
-
-```text
-output/whole_ear_r24/aligned_reference_weld_repaired/<sample>_aligned_whole_ear_points.csv
-output/whole_ear_r24/aligned_reference_weld_repaired/<sample>_aligned_whole_ear_faces.csv
-output/whole_ear_r24/aligned_reference_weld_repaired/alignment_qc_summary.csv
-```
-
-GPA 坐标系适用于群体 PCA 与平均耳；固定参考耳坐标系适用于工程展示、测量和对齐标准敏感性比较。两条路径均只使用旋转和平移。
-
-固定参考耳目录还会为每个样本额外导出同坐标的 `*_aligned_whole_ear.obj` 与 `*_aligned_whole_ear.stl`，供工程软件查看；PCA 仍读取 points/faces CSV。
-
-只有上游 `weld_repaired` 的 `weld_qc_summary.csv` 中 `pca_ready=True`、`input_layer=weld_repaired`，且对齐 QC 为 PASS 的样本可以进入正式 PCA。W3 还会逐样本验证有限坐标、`global_vertex_id` 点序和 faces 完全一致；不合格样本会记录到 `pca_input_manifest.csv`，不会静默混入。
-
-单独重跑 PCA 时也必须保持同一模式。隔离模式使用本次运行的 `<output-root>`，不能写回共享目录：
-
-```powershell
-python scripts/build_average_ear.py --aligned_dir <output-root>/whole_ear_r24/aligned_gpa --weld_dir <output-root>/whole_ear_r24/weld_repaired --out_dir <output-root>/pca_gpa_r24 --variance_threshold 0.75
-```
-
-固定参考耳分支将上例的 `aligned_gpa` 与 `pca_gpa_r24` 分别替换为 `aligned_reference_<reference-sample>` 与 `pca_reference_<reference-sample>_r24`；当前 `MQ_S076L` 示例对应 `aligned_reference_MQ_S076L` 与 `pca_reference_MQ_S076L_r24`。以下命令仅用于未传 `--output-root` 的 legacy CLI 模式：
-
-```powershell
-python scripts/build_average_ear.py --aligned_dir output/whole_ear_r24/aligned_weld_repaired --weld_dir output/whole_ear_r24/weld_repaired --out_dir output/w3_pca_r24 --variance_threshold 0.75
-```
-
-> 历史验证记录：本次首轮真实运行纳入 11 个旧数据集样本，输出 4453 顶点、8640 面的平均耳 `output/w3_pca_r24/mean_whole_ear.ply`。前三个主成分累计解释 75.35% 的差异，因此按 75% 阈值保留 3 个主成分。该结果用于流程验证，不代表当前 MQ 批次或稳定总体模型。
-
-### PCA 形态极值、自动聚类与极端个体
-
-从当前版本开始，`scripts/build_average_ear.py` 和全流程中的 PCA 阶段会在原 PCA 输出根目录下额外生成 `pca_morphology/`。原有命令行参数不变，且该目录只是 PCA 成功后的描述性后处理：它不会修改 Remesh、Salvage、Weld、对齐、PCA 纳入、平均耳、`scores.csv` 或任何样本的 PASS/FAIL 状态。
-
-```text
-<pca-output>/pca_morphology/
-  pca_morphology_summary.csv
-  pc_extreme_shapes.csv
-  observed_pc_extremes.csv
-  multivariate_extreme_individuals.csv
-  cluster_k_selection.csv
-  cluster_assignments.csv
-  cluster_summary.csv
-  cluster_means/Cluster_01_mean.ply
-  figures/pc1_pc2_clusters.png
-  figures/pc_variance_scree.png
-```
-
-结果的解释原则：
-
-1. `pc_modes/PC01_plus_2sd.ply`、`PC01_minus_2sd.ply`、`PC02_plus_2sd.ply`、`PC02_minus_2sd.ply` 是平均耳沿主成分的**理论形态**，不是某一个真实受试者。只要 PC02 存在，即使 75% 方差阈值只保留 PC01，也会输出 PC02 的展示模型。
-2. `observed_pc_extremes.csv` 是 PCA score 中 `PC01+/PC01-/PC02+/PC02-` 四个方向对应的**真实被试**；同一被试可占据多个方向。若有完全并列，按 `sample_tag` 字典序选主记录，并同时写出全部并列样本。
-3. 聚类使用达到当前 PCA 方差阈值（默认 75%）的全部 score，逐列 Z-score 后进行 Ward 层次聚类。系统在 `K=2` 到 `min(6, 样本数-1)` 中选择平均 silhouette score 最高的 K；`cluster_k_selection.csv` 保留所有候选 K 的依据。少于 4 个 PCA 纳入样本时跳过聚类，但 PCA 本身仍成功。
-4. `multivariate_extreme_individuals.csv` 根据标准化保留 PC score 到总体中心的距离排序，将最高 5% 标为“候选极端形态个体”。这仅表示应优先人工复核，绝不是质量失败、临床诊断或自动剔除条件。
-5. `pc1_pc2_clusters.png` 显示真实样本的 PC1–PC2 散点、聚类颜色与四个真实方向极值；`pc_variance_scree.png` 显示单个及累计解释方差。桌面软件在“结果复核 → PCA 形态分析”标签中可查看这些图、表格、理论形态、聚类平均耳和真实极端被试。
-
-`+PC` 与 `-PC` 仅表示本次 PCA 运行的正负 score 方向，不能在不核对三维模型的前提下直接赋予“更大/更小”“更宽/更窄”等固定解剖含义，也不应跨不同批次 PCA 直接比较其正负号。
-
-W3 技术路线详见：
-
-```text
-docs/W3 PCA 与平均耳技术路线.md
-```
-
-## 15. 文档维护规则
-
-每次代码调整、功能开发、数据流程变化或 QC 结论变化后，都应同步更新：
-
-1. `README.md`：记录当前项目真实状态、主命令、当前结论。
-2. `docs/W2 Remesh 使用说明.md`：记录 W2 使用方法、QC 判定和诊断流程。
-3. `docs/0711-Remesh QC 可视化与 Region Table 优化策略.md`：记录 QC 证据、region table 调整策略。
-4. `docs/W3 PCA 与平均耳技术路线.md`：记录 W3 输入契约、命令、输出和实际结果。
-
-不要让 README 停留在旧样本、旧 region table 或旧结论上。
-## 16. CLI 全流程运行（新版 MQ 输入）
-
-在项目根目录运行。`--parallel-workers 0` 为自动并行（最多 4），也可明确指定
-`1`、`2` 或 `4`；固定参考耳使用 `MQ_S076L`。
-
-```powershell
-python scripts\run_full_pipeline.py `
-  --mesh_dir data\clean_mesh `
-  --landmarks_dir data\landmarks `
-  --regions config\region_table.csv `
-  --parallel-workers 4 `
-  --alignment-mode fixed-reference `
-  --reference-sample MQ_S076L `
-  --output-root output\runs\mq_full_20260722
-```
-
-`--output-root` 必须是不存在或空目录。运行完成后，该目录包含 manifest、日志、QC、
-整耳、配准和 PCA 结果。如需 GPA 路线，将 `--alignment-mode` 改为 `gpa`
-并移除 `--reference-sample` 即可。
+- GPU 离线安装、诊断和 CPU/GPU 数值一致性要求：[GPU_ACCELERATION_OFFLINE.md](docs/GPU_ACCELERATION_OFFLINE.md)
+- Region Remesh 的方法与 QC 说明：[W2 Remesh 使用说明.md](docs/W2%20Remesh%20使用说明.md)
+- 整耳模板、Weld 与刚体坐标系统一：[整耳全局模板、边界焊接与刚体统一坐标系.md](docs/整耳全局模板、边界焊接与刚体统一坐标系.md)
+- PCA、平均耳与形态学结果：[W3 PCA 与平均耳技术路线.md](docs/W3%20PCA%20与平均耳技术路线.md)

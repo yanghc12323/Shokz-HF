@@ -75,6 +75,81 @@ def test_global_template_rejects_edge_used_by_more_than_two_regions():
         build_global_template(regions)
 
 
+def test_normalize_face_winding_flips_only_conflicting_neighbor_faces():
+    from ear_param.whole_ear import _normalize_face_winding
+
+    faces = pd.DataFrame([
+        {"global_face_id": 0, "global_v0": 0, "global_v1": 1, "global_v2": 2},
+        {"global_face_id": 1, "global_v0": 1, "global_v1": 2, "global_v2": 3},
+    ])
+
+    normalized, diagnostics = _normalize_face_winding(faces)
+
+    assert normalized[["global_v0", "global_v1", "global_v2"]].to_numpy().ravel().tolist() == [
+        0, 1, 2, 1, 3, 2,
+    ]
+    assert diagnostics.component_count == 1
+    assert diagnostics.flipped_face_count == 1
+    assert diagnostics.shared_edge_count == 1
+    assert diagnostics.same_direction_shared_edge_count == 1
+    assert diagnostics.constraint_conflict_count == 0
+
+
+def test_geomagic_blue_orientation_reverses_every_face_without_changing_geometry():
+    from ear_param.whole_ear import _orient_whole_ear_for_geomagic
+
+    faces = pd.DataFrame([
+        {"global_face_id": 0, "global_v0": 0, "global_v1": 1, "global_v2": 2},
+        {"global_face_id": 1, "global_v0": 2, "global_v1": 1, "global_v2": 3},
+    ])
+
+    oriented = _orient_whole_ear_for_geomagic(faces)
+
+    assert oriented[["global_v0", "global_v1", "global_v2"]].to_numpy().tolist() == [
+        [0, 2, 1],
+        [2, 3, 1],
+    ]
+    assert np.array_equal(
+        np.sort(oriented[["global_v0", "global_v1", "global_v2"]].to_numpy(), axis=1),
+        np.sort(faces[["global_v0", "global_v1", "global_v2"]].to_numpy(), axis=1),
+    )
+    pd.testing.assert_frame_equal(faces, pd.DataFrame([
+        {"global_face_id": 0, "global_v0": 0, "global_v1": 1, "global_v2": 2},
+        {"global_face_id": 1, "global_v0": 2, "global_v1": 1, "global_v2": 3},
+    ]))
+
+
+def test_geomagic_orientation_preserves_non_degenerate_template_faces():
+    """Whole-ear export must not collapse face indices during orientation."""
+    from ear_param.remesh import make_subdivision_template
+    from ear_param.whole_ear import _orient_whole_ear_for_geomagic
+
+    template_faces = make_subdivision_template(2).faces
+    faces = pd.DataFrame({
+        "sample_id": ["S1"] * len(template_faces),
+        "side": ["L"] * len(template_faces),
+        "region_id": ["R1"] * len(template_faces),
+        "region_face_id": np.arange(len(template_faces)),
+        "global_face_id": np.arange(len(template_faces)),
+        "global_v0": template_faces[:, 0],
+        "global_v1": template_faces[:, 1],
+        "global_v2": template_faces[:, 2],
+    })
+
+    oriented = _orient_whole_ear_for_geomagic(faces)
+    oriented_values = oriented[["global_v0", "global_v1", "global_v2"]].to_numpy()
+
+    assert not np.any(
+        (oriented_values[:, 0] == oriented_values[:, 1])
+        | (oriented_values[:, 1] == oriented_values[:, 2])
+        | (oriented_values[:, 0] == oriented_values[:, 2])
+    )
+    np.testing.assert_array_equal(
+        np.sort(oriented_values, axis=1),
+        np.sort(template_faces, axis=1),
+    )
+
+
 def _sample_tables():
     from ear_param.remesh import make_subdivision_template
 
@@ -279,6 +354,31 @@ def test_whole_ear_faces_are_globally_indexed_and_pass_with_larger_tolerance():
     assert bool(result.summary.loc[0, "pca_ready"])
 
 
+def test_whole_ear_summary_validates_final_oriented_face_topology():
+    from ear_param.whole_ear import assemble_whole_ear, build_global_template
+
+    regions, points, faces, qc = _sample_tables()
+    result = assemble_whole_ear(
+        build_global_template(regions),
+        points,
+        faces,
+        qc,
+        warning_mm=0.25,
+        fail_mm=1.0,
+    )
+
+    final_faces = result.faces[["global_v0", "global_v1", "global_v2"]].to_numpy()
+    actual_degenerate_count = int(np.sum(
+        (final_faces[:, 0] == final_faces[:, 1])
+        | (final_faces[:, 1] == final_faces[:, 2])
+        | (final_faces[:, 0] == final_faces[:, 2])
+    ))
+
+    assert actual_degenerate_count == 0
+    assert result.summary.loc[0, "degenerate_global_face_count"] == actual_degenerate_count
+    assert result.summary.loc[0, "status"] == "PASS"
+
+
 def test_whole_ear_fails_when_region_faces_are_incomplete():
     from ear_param.whole_ear import assemble_whole_ear, build_global_template
 
@@ -357,10 +457,10 @@ def test_edge_repair_promotes_one_warning_point_between_landmark_and_mapped_anch
     )
 
     template, points, faces, qc, mesh = _warning_edge_fixture()
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
-    final = assemble_whole_ear(template, repair.points, faces, qc)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
+    final = assemble_whole_ear(template, repair.points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
     assert baseline.summary.loc[0, "status"] == "WARNING"
     assert repair.qc["applied"].sum() == 1
@@ -377,9 +477,9 @@ def test_edge_repair_rejects_raw_fail_adjacent_region():
     template, points, faces, qc, mesh = _warning_edge_fixture(
         raw_statuses=("FAIL", "WARNING")
     )
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
 
     assert not repair.qc["applied"].any()
     assert "adjacent_raw_fail" in set(repair.qc["rejection_reason"])
@@ -400,9 +500,9 @@ def test_edge_repair_allows_accepted_degenerate_salvage_adjacent_region():
     qc.loc[salvaged, "degenerate_before"] = 1
     qc.loc[salvaged, "degenerate_after"] = 0
     qc.loc[salvaged, "degenerate_salvage_accepted"] = True
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
 
     assert repair.qc["applied"].sum() == 1
     assert not repair.qc.loc[repair.qc["applied"], "rejection_reason"].any()
@@ -416,9 +516,9 @@ def test_edge_repair_rejects_degenerate_adjacent_region():
 
     template, points, faces, qc, mesh = _warning_edge_fixture()
     qc.loc[qc["region_id"] == "R1", "degenerate_faces"] = 1
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
 
     assert not repair.qc["applied"].any()
     assert "adjacent_degenerate_face" in set(repair.qc["rejection_reason"])
@@ -434,9 +534,9 @@ def test_edge_repair_audits_non_finite_edge_candidate_without_attempting_repair(
     template, points, faces, qc, mesh = _warning_edge_fixture()
     mask = (points["region_id"] == "R1") & (points["region_point_id"] == 3)
     points.loc[mask, "x"] = np.nan
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
 
     audit = repair.qc.set_index("edge_index")
     assert baseline.summary.loc[0, "status"] == "FAIL"
@@ -456,9 +556,9 @@ def test_edge_repair_rejects_run_longer_than_limit():
         resolution=4,
         conflict_indices=(1, 2, 3),
     )
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
 
     assert not repair.qc["applied"].any()
     assert "conflict_run_too_long" in set(repair.qc["rejection_reason"])
@@ -471,9 +571,9 @@ def test_edge_repair_projects_interpolated_point_and_updates_both_region_copies(
     )
 
     template, points, faces, qc, mesh = _warning_edge_fixture()
-    baseline = assemble_whole_ear(template, points, faces, qc)
+    baseline = assemble_whole_ear(template, points, faces, qc, warning_mm=0.25, fail_mm=1.0)
 
-    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline)
+    repair = repair_shared_edge_conflicts(template, points, qc, mesh, baseline, warning_mm=0.25, fail_mm=1.0)
     changed = repair.points.query("repair_method == 'edge_coupled_interpolation'")
 
     assert len(changed) == 2
@@ -514,6 +614,10 @@ def test_build_whole_ear_cli_exports_edge_repair_qc_in_separate_layer():
             "--mesh_dir",
             str(mesh_dir),
             "--enable_edge_repair",
+            "--weld_warning_mm",
+            "0.25",
+            "--weld_fail_mm",
+            "1.0",
             "--out_dir",
             str(output_dir),
         ],
@@ -572,4 +676,18 @@ def test_build_whole_ear_cli_exports_csv_ply_and_qc_figure():
     assert (output_dir / "S1_L_weld_qc_vertices.csv").exists()
     assert (output_dir / "S1_L_weld_qc_summary.csv").exists()
     assert (output_dir / "S1_L_weld_qc.png").exists()
+    exported_faces = pd.read_csv(output_dir / "S1_L_whole_ear_faces.csv")
+    exported_mesh = trimesh.load(
+        output_dir / "S1_L_whole_ear_welded.ply", force="mesh", process=False
+    )
+    np.testing.assert_array_equal(
+        exported_mesh.faces,
+        exported_faces[["global_v0", "global_v1", "global_v2"]].to_numpy(dtype=int),
+    )
+    exported_summary = pd.read_csv(output_dir / "S1_L_weld_qc_summary.csv")
+    assert exported_summary.loc[0, "geomagic_exterior_color"] == "blue"
+    assert (
+        exported_summary.loc[0, "geomagic_global_orientation_flipped_face_count"]
+        == len(exported_faces)
+    )
     assert "S1_L" in completed.stdout

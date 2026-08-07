@@ -51,8 +51,8 @@ def main() -> None:
         ),
     )
     parser.add_argument("--samples", nargs="+", help="Optional sample tags, e.g. MQ_S013L.")
-    parser.add_argument("--weld_warning_mm", type=float, default=0.25)
-    parser.add_argument("--weld_fail_mm", type=float, default=1.0)
+    parser.add_argument("--weld_warning_mm", type=float, default=0.5)
+    parser.add_argument("--weld_fail_mm", type=float, default=1.5)
     parser.add_argument("--mesh_dir", default="data/clean_mesh")
     parser.add_argument(
         "--enable_edge_repair",

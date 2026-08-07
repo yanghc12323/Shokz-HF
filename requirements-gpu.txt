@@ -1,0 +1,4 @@
+# Optional GPU acceleration for the Remesh UV operations only.
+# Keep this separate from requirements.txt so CPU-only CLI and desktop builds
+# remain installable on ordinary Windows workstations.
+cupy-cuda12x[ctk]==14.1.1

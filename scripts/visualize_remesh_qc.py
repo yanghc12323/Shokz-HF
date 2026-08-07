@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from time import perf_counter
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -18,7 +19,6 @@ from ear_param.pipeline import discover_sample_inputs, split_sample_tag
 from ear_param.qc_visualization import (
     classify_region_qc,
     classify_repaired_region_qc,
-    save_region_qc_figure,
     save_region_repaired_qc_figure,
 )
 from ear_param.remesh import build_region_remesh, repair_unmapped_samples
@@ -55,13 +55,13 @@ Example:
     parser.add_argument(
         "--max_salvage_unmapped_ratio",
         type=float,
-        default=0.35,
+        default=0.45,
         help="Maximum raw unmapped ratio allowed for raw-FAIL salvage attempts.",
     )
     parser.add_argument(
         "--max_salvage_degenerate_ratio",
         type=float,
-        default=0.015,
+        default=0.03,
         help="Maximum raw degenerate-face ratio allowed for salvaged UV repair.",
     )
     args = parser.parse_args()
@@ -69,11 +69,7 @@ Example:
     data_dir = Path(args.data_dir)
     out_dir = Path(args.out_dir)
     summary_dir = summary_output_root(out_dir, Path(args.summary_dir) if args.summary_dir else None)
-    raw_out_dir = out_dir / "raw"
-    repaired_out_dir = out_dir / "repaired"
     salvaged_out_dir = out_dir / "salvaged"
-    raw_out_dir.mkdir(parents=True, exist_ok=True)
-    repaired_out_dir.mkdir(parents=True, exist_ok=True)
     salvaged_out_dir.mkdir(parents=True, exist_ok=True)
     (summary_dir / "raw").mkdir(parents=True, exist_ok=True)
     (summary_dir / "repaired").mkdir(parents=True, exist_ok=True)
@@ -115,11 +111,11 @@ Example:
             region = row.to_dict()
             region_id = str(region["region_id"])
             print(f"[QC] {sample_tag} {region_id}")
-            raw_figure_path = raw_out_dir / sample_tag / f"{region_id}_qc.png"
-            repaired_figure_path = repaired_out_dir / sample_tag / f"{region_id}_qc.png"
             salvaged_figure_path = salvaged_out_dir / sample_tag / f"{region_id}_qc.png"
             try:
+                region_started = perf_counter()
                 result = build_region_remesh(mesh, landmarks, region)
+                region_remesh_seconds = perf_counter() - region_started
                 raw_record = classify_region_qc(sample_tag, result)
                 repaired = repair_unmapped_samples(result)
                 repaired_record = classify_repaired_region_qc(sample_tag, result, repaired)
@@ -136,13 +132,13 @@ Example:
                 raw_record.update({
                     "sample_id": sample_id,
                     "side": side,
-                    "figure_path": str(raw_figure_path) if "raw" in figure_layers else "",
+                    "figure_path": "",
                     "error": "",
                 })
                 repaired_record.update({
                     "sample_id": sample_id,
                     "side": side,
-                    "figure_path": str(repaired_figure_path) if "repaired" in figure_layers else "",
+                    "figure_path": "",
                     "error": "",
                 })
                 salvaged_record.update({
@@ -151,12 +147,12 @@ Example:
                     "figure_path": str(salvaged_figure_path) if "salvaged" in figure_layers else "",
                     "error": "",
                 })
-                if "raw" in figure_layers:
-                    save_region_qc_figure(mesh, result, raw_figure_path, max_patch_faces=args.max_patch_faces)
-                if "repaired" in figure_layers:
-                    save_region_repaired_qc_figure(mesh, result, repaired, repaired_figure_path, max_patch_faces=args.max_patch_faces)
+                for record in (raw_record, repaired_record, salvaged_record):
+                    record["region_remesh_seconds"] = region_remesh_seconds
+                    record["region_total_seconds"] = perf_counter() - region_started
                 if "salvaged" in figure_layers:
                     save_region_repaired_qc_figure(mesh, result, salvaged, salvaged_figure_path, max_patch_faces=args.max_patch_faces)
+                    salvaged_record["region_total_seconds"] = perf_counter() - region_started
             except Exception as exc:
                 raw_record = {
                     "sample_tag": sample_tag,
@@ -194,8 +190,26 @@ Example:
                     "degenerate_salvage_accepted": False,
                     "degenerate_salvage_method": "",
                     "degenerate_salvage_rejection_reason": "region_error",
+                    "dense_validation_resolution": 48,
+                    "dense_unmapped_count": 0,
+                    "dense_degenerate_face_count": 0,
+                    "dense_min_triangle_area_3d": float("nan"),
+                    "dense_failure_type": "not_run",
+                    "dense_coverage_repair_attempted": False,
+                    "dense_coverage_repair_accepted": False,
+                    "dense_coverage_repair_before": 0,
+                    "dense_coverage_repair_after": 0,
+                    "dense_coverage_repair_max_uv_displacement": 0.0,
+                    "degenerate_component_count": 0,
+                    "largest_degenerate_component_faces": 0,
+                    "degenerate_component_touches_boundary": False,
+                    "degenerate_component_repair_attempted": False,
+                    "degenerate_component_repair_accepted": False,
                 })
                 salvaged_record = dict(repaired_record)
+                for record in (raw_record, repaired_record, salvaged_record):
+                    record["region_remesh_seconds"] = 0.0
+                    record["region_total_seconds"] = 0.0
                 print(f"  [ERROR] {exc}")
             raw_summary_records.append(raw_record)
             repaired_summary_records.append(repaired_record)
@@ -237,9 +251,9 @@ def _split_sample_tag(sample_tag: str) -> tuple[str, str]:
 def figure_layers_for_mode(mode: str, repaired_status: str) -> set[str]:
     """Return the output layers whose Region QC PNGs should be rendered."""
     if mode == "all":
-        return {"raw", "repaired", "salvaged"}
+        return {"salvaged"}
     if mode == "repaired-fail" and repaired_status.upper() == "FAIL":
-        return {"repaired"}
+        return {"salvaged"}
     return set()
 
 

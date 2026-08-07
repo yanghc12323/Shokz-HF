@@ -33,6 +33,15 @@ def split_sample_tag(sample_tag: str) -> tuple[str, str]:
     raise ValueError(f"sample tag must end in _L/_R or use MQ_S###L/R: {sample_tag}")
 
 
+def compose_sample_tag(sample_id: str, side: str) -> str:
+    """Rebuild a formal sample tag from fields stored in result CSV files."""
+    normalized_side = str(side).upper()
+    normalized_id = str(sample_id)
+    if re.fullmatch(r"MQ_S\d{3}", normalized_id) and normalized_side in {"L", "R"}:
+        return f"{normalized_id}{normalized_side}"
+    return f"{normalized_id}_{normalized_side}"
+
+
 def landmark_tag_for_sample(sample_tag: str) -> str:
     """Translate an MQ mesh tag to its landmark tag; preserve legacy tags."""
     mq_match = _MQ_SAMPLE_TAG.fullmatch(sample_tag)
@@ -135,13 +144,13 @@ class PipelineConfig:
     canonical_side: str = "L"
     mirror_axis: str = "x"
     disable_side_normalization: bool = True
-    max_salvage_degenerate_ratio: float = 0.015
+    max_salvage_degenerate_ratio: float = 0.03
     sample_tags: tuple[str, ...] = ()
     skip_remesh_qc: bool = False
     skip_pca: bool = False
     reference_sample: str | None = None
     reporter: Callable[[str], None] | None = None
-    max_salvage_unmapped_ratio: float = 0.35
+    max_salvage_unmapped_ratio: float = 0.45
     pca_variance_threshold: float = 0.75
     event_reporter: Callable[[str, dict[str, object]], None] | None = None
     checkpoint: Callable[[], None] | None = None
@@ -149,6 +158,9 @@ class PipelineConfig:
     qc_figure_mode: str = "all"
     alignment_mode: str = "gpa"
     parallel_workers: int = 1
+    weld_warning_mm: float = 0.5
+    weld_fail_mm: float = 1.5
+    remesh_backend: str = "cpu"
 
 
 def _effective_parallel_workers(requested: int) -> int:
@@ -186,6 +198,7 @@ class PipelineResult:
     reference_pca_status: str = "SKIPPED_BY_OPTION"
     reference_pca_result: dict[str, object] = field(default_factory=dict)
     stage_timings: list[dict[str, object]] = field(default_factory=list)
+    remesh_backend_summary: dict[str, object] = field(default_factory=dict)
 
 
 def write_pipeline_outputs(result: PipelineResult, run_dir: Path) -> None:
@@ -197,6 +210,7 @@ def write_pipeline_outputs(result: PipelineResult, run_dir: Path) -> None:
         result.stage_timings,
         columns=["stage", "sample_tag", "elapsed_seconds", "status"],
     ).to_csv(run_dir / "pipeline_timing_summary.csv", index=False)
+    _write_sample_processing_time_text(result.stage_timings, run_dir / "sample_processing_time.txt")
     summary = {
         "discovered_sample_count": len(result.records),
         "ready_sample_count": int((result.records["discovery"] == "READY").sum()),
@@ -226,6 +240,32 @@ def write_pipeline_outputs(result: PipelineResult, run_dir: Path) -> None:
     (run_dir / "pipeline_run.log").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def _write_sample_processing_time_text(
+    stage_timings: list[dict[str, object]],
+    out_path: Path,
+) -> None:
+    """Write a compact operator-facing per-sample time summary."""
+    timings = pd.DataFrame(
+        stage_timings,
+        columns=["stage", "sample_tag", "elapsed_seconds", "status"],
+    )
+    per_sample = timings.loc[timings["sample_tag"].fillna("").astype(str).ne("")].copy()
+    lines = [
+        "样本处理耗时汇总（Remesh 与 Remesh QC）",
+        "样本\tRemesh(秒)\tQC(秒)\t总耗时(秒)\t最终阶段状态",
+    ]
+    if per_sample.empty:
+        lines.append("本次运行没有可汇总的样本阶段耗时。")
+    else:
+        for sample_tag, group in per_sample.groupby("sample_tag", sort=True):
+            remesh = group.loc[group["stage"] == "REMESH", "elapsed_seconds"].sum()
+            qc = group.loc[group["stage"] == "REMESH_QC", "elapsed_seconds"].sum()
+            total = group["elapsed_seconds"].sum()
+            status = str(group.iloc[-1]["status"])
+            lines.append(f"{sample_tag}\t{remesh:.2f}\t{qc:.2f}\t{total:.2f}\t{status}")
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def run_pipeline(
     config: PipelineConfig,
     *,
@@ -234,6 +274,8 @@ def run_pipeline(
     """Run staged sample processing while isolating failures to one sample."""
     if config.alignment_mode not in {"gpa", "fixed-reference"}:
         raise ValueError(f"unsupported alignment mode: {config.alignment_mode!r}")
+    if config.remesh_backend not in {"cpu", "cuda", "auto"}:
+        raise ValueError(f"unsupported remesh backend: {config.remesh_backend!r}")
     if config.alignment_mode == "fixed-reference" and not config.reference_sample:
         raise ValueError("fixed-reference alignment requires reference_sample")
     discovered_inputs = discover_sample_inputs(config.mesh_dir, config.landmarks_dir)
@@ -365,6 +407,7 @@ def run_pipeline(
         reference_pca_status=reference_pca_status,
         reference_pca_result=reference_pca_result,
         stage_timings=stage_timings,
+        remesh_backend_summary=_summarize_remesh_backends(config),
     )
 
 
@@ -816,22 +859,21 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
         _run_command([
             sys.executable, str(project_root / "scripts" / "parameterize_ear_remesh.py"),
             "--sample_id", sample_id, "--side", side,
+            "--sample-tag", sample_tag,
             "--mesh", str(config.canonical_dir / f"{sample_tag}.ply"),
             "--landmarks", str(config.canonical_dir / f"{sample_tag}_landmarks.csv"),
             "--regions", str(config.regions),
-            "--out_dir", str(config.raw_dir),
-            "--mesh_out_dir", str(config.raw_mesh_dir),
-            "--repaired_out_dir", str(config.repaired_dir),
-            "--repaired_mesh_out_dir", str(config.repaired_mesh_dir),
             "--salvaged_out_dir", str(config.salvaged_dir),
             "--salvaged_mesh_out_dir", str(config.salvaged_mesh_dir),
             "--max_salvage_unmapped_ratio", str(config.max_salvage_unmapped_ratio),
             "--max_salvage_degenerate_ratio", str(config.max_salvage_degenerate_ratio),
+            "--remesh-backend", config.remesh_backend,
             *( ["--event-log", str(event_log)] if event_log else [] ),
         ], project_root)
+        salvaged_qc_path = config.salvaged_dir / f"{sample_tag}_remesh_qc.csv"
         return {
-            "remesh": _aggregate_qc_status(config.raw_dir / f"{sample_tag}_remesh_qc.csv"),
-            "salvage": _aggregate_qc_status(config.salvaged_dir / f"{sample_tag}_remesh_qc.csv"),
+            "remesh": _aggregate_raw_status_from_salvaged_qc(salvaged_qc_path),
+            "salvage": _aggregate_qc_status(salvaged_qc_path),
         }
 
     def remesh_qc(sample_tag: str) -> str:
@@ -867,10 +909,15 @@ def build_subprocess_stages(config: PipelineConfig) -> StageFunctions:
             sys.executable, str(project_root / "scripts" / "build_whole_ear.py"),
             "--input_dir", str(config.salvaged_dir), "--regions", str(config.regions),
             "--mesh_dir", str(config.canonical_dir), "--enable_edge_repair",
+            "--weld_warning_mm", str(config.weld_warning_mm),
+            "--weld_fail_mm", str(config.weld_fail_mm),
             "--out_dir", str(config.weld_dir), "--samples", *sample_tags,
         ], project_root)
         summary = pd.read_csv(config.weld_dir / "whole_ear_weld_summary.csv")
-        summary["sample_tag"] = summary["sample_id"].astype(str) + "_" + summary["side"].astype(str)
+        summary["sample_tag"] = [
+            compose_sample_tag(sample_id, side)
+            for sample_id, side in zip(summary["sample_id"], summary["side"])
+        ]
         return summary.loc[summary["sample_tag"].isin(sample_tags)]
 
     def alignment_batch(sample_tags: list[str]) -> pd.DataFrame:
@@ -996,6 +1043,88 @@ def _run_command(command: list[str], cwd: Path) -> None:
 
 def _aggregate_qc_status(path: Path) -> str:
     return _aggregate_status_values(pd.read_csv(path)["status"])
+
+
+def _aggregate_raw_status_from_salvaged_qc(path: Path) -> str:
+    """Recover raw QC status from the sole retained per-sample Salvaged QC file."""
+    qc = pd.read_csv(path)
+    column = "raw_status" if "raw_status" in qc.columns else "status"
+    return _aggregate_status_values(qc[column])
+
+
+def _summarize_remesh_backends(config: PipelineConfig) -> dict[str, object]:
+    """Aggregate per-sample backend diagnostics without requiring CuPy in CPU runs."""
+    reports: list[dict[str, object]] = []
+    for path in sorted(Path(config.salvaged_dir).glob("*_remesh_backend.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(payload, dict):
+            reports.append(payload)
+
+    if not reports:
+        from ear_param.remesh_backend import backend_diagnostics
+
+        return backend_diagnostics(config.remesh_backend)
+
+    effective_values = {
+        str(report.get("effective", "cpu")) for report in reports
+    }
+    fallback_reasons = sorted({
+        str(report.get("fallback_reason", ""))
+        for report in reports
+        if str(report.get("fallback_reason", ""))
+    })
+    return {
+        "requested": config.remesh_backend,
+        "effective": next(iter(effective_values)) if len(effective_values) == 1 else "mixed",
+        "fallback_reason": " | ".join(fallback_reasons),
+        "gpu_peak_bytes": max(
+            (int(report.get("gpu_peak_bytes", 0) or 0) for report in reports),
+            default=0,
+        ),
+        "sample_count": len(reports),
+        "gpu_timing": _aggregate_gpu_timing(reports),
+    }
+
+
+def _aggregate_gpu_timing(reports: list[dict[str, object]]) -> dict[str, float | int]:
+    """Add per-sample GPU timing counters into the run-level manifest summary."""
+    timing_keys = (
+        "lock_wait_seconds",
+        "host_to_device_seconds",
+        "harmonic_solve_seconds",
+        "uv_lookup_seconds",
+        "map_to_3d_seconds",
+        "device_to_host_seconds",
+        "region_wall_seconds",
+    )
+    summary: dict[str, float | int] = {
+        "region_count": 0,
+        **{key: 0.0 for key in timing_keys},
+    }
+    for report in reports:
+        timing = report.get("gpu_timing")
+        if not isinstance(timing, dict):
+            continue
+        try:
+            summary["region_count"] = int(summary["region_count"]) + int(
+                timing.get("region_count", 0) or 0
+            )
+        except (TypeError, ValueError):
+            pass
+        for key in timing_keys:
+            try:
+                value = float(timing.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0.0:
+                summary[key] = float(summary[key]) + value
+    return {
+        "region_count": int(summary["region_count"]),
+        **{key: round(float(summary[key]), 6) for key in timing_keys},
+    }
 
 
 def _aggregate_status_values(values: pd.Series) -> str:

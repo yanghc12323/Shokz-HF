@@ -9,15 +9,22 @@ parameterisation, regular subdivision, and UV-face sample lookup.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
 import trimesh
 from scipy.sparse import csr_matrix, lil_matrix
 from scipy.sparse.csgraph import dijkstra
-from scipy.sparse.linalg import spsolve
 from scipy.spatial import cKDTree
+
+from ear_param.remesh_backend import (
+    BackendComputationError,
+    CpuRemeshBackend,
+    RemeshBackend,
+    resolve_remesh_backend,
+)
 
 
 def make_barycentric_grid(resolution: int) -> np.ndarray:
@@ -114,6 +121,9 @@ class RemeshContext:
     snapped_landmarks: dict[str, SnappedLandmark]
     path_cache: dict[tuple[int, int], list[int]]
     templates: dict[int, SubdivisionTemplate]
+    shortest_path_trees: dict[int, tuple[np.ndarray, np.ndarray]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass(frozen=True)
@@ -166,7 +176,23 @@ class RepairedSamples:
     degenerate_salvage_accepted: bool = False
     degenerate_salvage_method: str = ""
     degenerate_salvage_rejection_reason: str = ""
+    dense_validation_resolution: int = 48
+    dense_unmapped_count: int = 0
+    dense_degenerate_face_count: int = 0
+    dense_min_triangle_area_3d: float = float("nan")
+    dense_failure_type: str = "not_run"
+    dense_coverage_repair_attempted: bool = False
+    dense_coverage_repair_accepted: bool = False
+    dense_coverage_repair_before: int = 0
+    dense_coverage_repair_after: int = 0
+    dense_coverage_repair_max_uv_displacement: float = 0.0
+    degenerate_component_count: int = 0
+    largest_degenerate_component_faces: int = 0
+    degenerate_component_touches_boundary: bool = False
+    degenerate_component_repair_attempted: bool = False
+    degenerate_component_repair_accepted: bool = False
     repaired_uv: np.ndarray | None = None
+    repair_timing: "RepairTiming" = field(default_factory=lambda: RepairTiming())
 
     @property
     def repaired_count(self) -> int:
@@ -182,6 +208,64 @@ class DegenerateUVRepair:
     degenerate_after: int
     method: str
     rejection_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RepairTiming:
+    """Wall-clock timing for expensive salvage phases of one region."""
+
+    degenerate_relaxation_seconds: float = 0.0
+    component_repair_seconds: float = 0.0
+    dense_validation_seconds: float = 0.0
+    dense_coverage_repair_seconds: float = 0.0
+    total_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class RegionRepairTopology:
+    """Immutable local topology shared by all salvage candidates of one region."""
+
+    faces: np.ndarray
+    boundary_ids: set[int]
+    neighbors: list[set[int]]
+    incident_faces: list[list[int]]
+
+
+@dataclass(frozen=True)
+class DenseUVValidation:
+    """Detailed r48 validation of a repaired UV parameterization."""
+
+    resolution: int
+    unmapped_count: int
+    degenerate_face_count: int
+    min_triangle_area_3d: float
+    failure_type: str
+
+    @property
+    def is_valid(self) -> bool:
+        return self.failure_type == "pass"
+
+
+@dataclass(frozen=True)
+class DegenerateUVComponentProfile:
+    """Topology summary of collapsed UV faces before component repair."""
+
+    component_count: int
+    largest_component_face_count: int
+    touches_boundary: bool
+    repairable_component_count: int
+
+
+@dataclass(frozen=True)
+class DegenerateUVComponentRepair:
+    """Local harmonic reparameterization candidate and its audit profile."""
+
+    uv_repair: DegenerateUVRepair
+    profile: DegenerateUVComponentProfile
+    attempted: bool
+
+
+_MAX_SMALL_DENSE_UV_GAP_COUNT = 18
 
 
 def classify_remesh_qc_status(
@@ -207,8 +291,8 @@ def repair_unmapped_samples(
     *,
     fail_unmapped_ratio: float = 0.2,
     allow_raw_fail_repair: bool = False,
-    max_raw_fail_repair_unmapped_ratio: float = 0.35,
-    max_raw_fail_repair_degenerate_ratio: float = 0.015,
+    max_raw_fail_repair_unmapped_ratio: float = 0.45,
+    max_raw_fail_repair_degenerate_ratio: float = 0.03,
     vertex_ring_steps: int = 2,
     smoothing_iterations: int = 80,
 ) -> RepairedSamples:
@@ -219,6 +303,7 @@ def repair_unmapped_samples(
     with a small degenerate-UV ratio can be locally reparameterized before the
     existing unmapped-point repair is applied.
     """
+    repair_started = perf_counter()
     points = np.asarray(result.sample_points_3d, dtype=float).copy()
     raw_unmapped = np.asarray(result.located_samples.unmapped_mask, dtype=bool)
     n_samples = len(points)
@@ -241,7 +326,23 @@ def repair_unmapped_samples(
     degenerate_salvage_attempted = False
     degenerate_salvage_method = ""
     degenerate_salvage_rejection_reason = ""
+    dense_validation = DenseUVValidation(48, 0, 0, float("nan"), "not_run")
+    dense_coverage_repair_attempted = False
+    dense_coverage_repair_accepted = False
+    dense_coverage_repair_before = 0
+    dense_coverage_repair_after = 0
+    dense_coverage_repair_max_uv_displacement = 0.0
+    degenerate_component_count = 0
+    largest_degenerate_component_faces = 0
+    degenerate_component_touches_boundary = False
+    degenerate_component_repair_attempted = False
+    degenerate_component_repair_accepted = False
     repaired_uv: np.ndarray | None = None
+    topology: RegionRepairTopology | None = None
+    degenerate_relaxation_seconds = 0.0
+    component_repair_seconds = 0.0
+    dense_validation_seconds = 0.0
+    dense_coverage_repair_seconds = 0.0
 
     if max_raw_fail_repair_degenerate_ratio < 0.0:
         raise ValueError("max_raw_fail_repair_degenerate_ratio must be >= 0")
@@ -275,17 +376,117 @@ def repair_unmapped_samples(
                 degenerate_salvage_accepted=False,
                 degenerate_salvage_method=degenerate_salvage_method,
                 degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+                repair_timing=RepairTiming(total_seconds=perf_counter() - repair_started),
             )
         salvage_attempted = True
 
         if n_degenerate > 0:
             degenerate_salvage_attempted = True
-            uv_repair = _repair_degenerate_uv_faces(result)
-            repaired_uv = uv_repair.uv
-            degenerate_after = uv_repair.degenerate_after
-            degenerate_salvage_method = uv_repair.method
-            if degenerate_after > 0:
-                salvage_rejection_reason = uv_repair.rejection_reason or "degenerate_repair_incomplete"
+            topology = _prepare_region_repair_topology(result)
+            candidate_failure: tuple[DegenerateUVRepair, DenseUVValidation | None] | None = None
+            candidate_started = perf_counter()
+            candidates = _degenerate_uv_repair_candidates(result, topology=topology)
+            degenerate_relaxation_seconds += perf_counter() - candidate_started
+            for uv_repair in candidates:
+                component_candidate_used = False
+                if uv_repair.degenerate_after > 0:
+                    component_started = perf_counter()
+                    component_repair = _repair_degenerate_uv_components(
+                        result,
+                        uv_repair,
+                        topology=topology,
+                    )
+                    component_repair_seconds += perf_counter() - component_started
+                    profile = component_repair.profile
+                    degenerate_component_count = max(
+                        degenerate_component_count,
+                        profile.component_count,
+                    )
+                    largest_degenerate_component_faces = max(
+                        largest_degenerate_component_faces,
+                        profile.largest_component_face_count,
+                    )
+                    degenerate_component_touches_boundary = (
+                        degenerate_component_touches_boundary or profile.touches_boundary
+                    )
+                    degenerate_component_repair_attempted = (
+                        degenerate_component_repair_attempted or component_repair.attempted
+                    )
+                    if component_repair.uv_repair.degenerate_after < uv_repair.degenerate_after:
+                        uv_repair = component_repair.uv_repair
+                        component_candidate_used = True
+                if candidate_failure is None or uv_repair.degenerate_after < candidate_failure[0].degenerate_after:
+                    candidate_failure = (uv_repair, None)
+                if uv_repair.degenerate_after > 0:
+                    continue
+
+                validation_started = perf_counter()
+                validation = _inspect_dense_uv_mapping(
+                    uv_repair.uv,
+                    result.parameterization.local_faces,
+                    result.parameterization.local_vertices,
+                )
+                dense_validation_seconds += perf_counter() - validation_started
+                if _is_small_dense_coverage_gap(validation):
+                    dense_coverage_repair_attempted = True
+                    dense_coverage_repair_before = validation.unmapped_count
+                    coverage_started = perf_counter()
+                    coverage_candidate = _repair_small_dense_uv_gaps(
+                        result,
+                        uv_repair,
+                        validation,
+                        topology=topology,
+                    )
+                    dense_coverage_repair_seconds += perf_counter() - coverage_started
+                    validation_started = perf_counter()
+                    coverage_validation = _inspect_dense_uv_mapping(
+                        coverage_candidate.uv,
+                        result.parameterization.local_faces,
+                        result.parameterization.local_vertices,
+                    )
+                    dense_validation_seconds += perf_counter() - validation_started
+                    dense_coverage_repair_after = coverage_validation.unmapped_count
+                    dense_coverage_repair_max_uv_displacement = max(
+                        dense_coverage_repair_max_uv_displacement,
+                        _max_uv_displacement(uv_repair.uv, coverage_candidate.uv),
+                    )
+                    if coverage_validation.is_valid:
+                        repaired_uv = coverage_candidate.uv
+                        degenerate_after = coverage_candidate.degenerate_after
+                        degenerate_salvage_method = coverage_candidate.method
+                        dense_validation = coverage_validation
+                        dense_coverage_repair_accepted = True
+                        degenerate_component_repair_accepted = component_candidate_used
+                        break
+                    uv_repair = coverage_candidate
+                    validation = coverage_validation
+                if not validation.is_valid:
+                    if candidate_failure[1] is None:
+                        candidate_failure = (uv_repair, validation)
+                    continue
+
+                repaired_uv = uv_repair.uv
+                degenerate_after = uv_repair.degenerate_after
+                degenerate_salvage_method = uv_repair.method
+                dense_validation = validation
+                degenerate_component_repair_accepted = component_candidate_used
+                break
+
+            if repaired_uv is None:
+                assert candidate_failure is not None
+                uv_repair, validation = candidate_failure
+                repaired_uv = uv_repair.uv
+                degenerate_after = uv_repair.degenerate_after
+                degenerate_salvage_method = uv_repair.method
+                if validation is not None:
+                    dense_validation = validation
+                    salvage_rejection_reason = validation.failure_type
+                else:
+                    salvage_rejection_reason = (
+                        "degenerate_component_touches_boundary"
+                        if degenerate_component_touches_boundary
+                        else uv_repair.rejection_reason or "degenerate_repair_incomplete"
+                    )
                 degenerate_salvage_rejection_reason = salvage_rejection_reason
                 return RepairedSamples(
                     points_3d=points,
@@ -305,7 +506,29 @@ def repair_unmapped_samples(
                     degenerate_salvage_accepted=False,
                     degenerate_salvage_method=degenerate_salvage_method,
                     degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+                    dense_validation_resolution=dense_validation.resolution,
+                    dense_unmapped_count=dense_validation.unmapped_count,
+                    dense_degenerate_face_count=dense_validation.degenerate_face_count,
+                    dense_min_triangle_area_3d=dense_validation.min_triangle_area_3d,
+                    dense_failure_type=dense_validation.failure_type,
+                    dense_coverage_repair_attempted=dense_coverage_repair_attempted,
+                    dense_coverage_repair_accepted=dense_coverage_repair_accepted,
+                    dense_coverage_repair_before=dense_coverage_repair_before,
+                    dense_coverage_repair_after=dense_coverage_repair_after,
+                    dense_coverage_repair_max_uv_displacement=dense_coverage_repair_max_uv_displacement,
+                    degenerate_component_count=degenerate_component_count,
+                    largest_degenerate_component_faces=largest_degenerate_component_faces,
+                    degenerate_component_touches_boundary=degenerate_component_touches_boundary,
+                    degenerate_component_repair_attempted=degenerate_component_repair_attempted,
+                    degenerate_component_repair_accepted=degenerate_component_repair_accepted,
                     repaired_uv=repaired_uv,
+                    repair_timing=RepairTiming(
+                        degenerate_relaxation_seconds=degenerate_relaxation_seconds,
+                        component_repair_seconds=component_repair_seconds,
+                        dense_validation_seconds=dense_validation_seconds,
+                        dense_coverage_repair_seconds=dense_coverage_repair_seconds,
+                        total_seconds=perf_counter() - repair_started,
+                    ),
                 )
 
             remapped = locate_uv_samples_in_faces_indexed(
@@ -318,33 +541,6 @@ def repair_unmapped_samples(
                 result.parameterization.local_faces,
                 remapped,
             )
-            if not _dense_uv_mapping_is_valid(
-                repaired_uv,
-                result.parameterization.local_faces,
-                result.parameterization.local_vertices,
-            ):
-                salvage_rejection_reason = "dense_validation_failed"
-                degenerate_salvage_rejection_reason = salvage_rejection_reason
-                return RepairedSamples(
-                    points_3d=points,
-                    repaired_mask=repaired_mask,
-                    repair_methods=repair_methods,
-                    raw_status=raw_status,
-                    status="FAIL",
-                    exportable=False,
-                    repaired_unmapped_count=int((~np.isfinite(points).all(axis=1)).sum()),
-                    salvage_attempted=True,
-                    salvage_accepted=False,
-                    salvage_rejection_reason=salvage_rejection_reason,
-                    degenerate_ratio=degenerate_ratio,
-                    degenerate_before=n_degenerate,
-                    degenerate_after=degenerate_after,
-                    degenerate_salvage_attempted=True,
-                    degenerate_salvage_accepted=False,
-                    degenerate_salvage_method=degenerate_salvage_method,
-                    degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
-                    repaired_uv=repaired_uv,
-                )
 
             remapped_raw_unmapped = raw_unmapped & np.isfinite(points).all(axis=1)
             repaired_mask[remapped_raw_unmapped] = True
@@ -362,6 +558,7 @@ def repair_unmapped_samples(
             degenerate_ratio=degenerate_ratio,
             degenerate_before=n_degenerate,
             degenerate_after=degenerate_after,
+            repair_timing=RepairTiming(total_seconds=perf_counter() - repair_started),
         )
 
     bary = np.asarray(result.template.barycentric, dtype=float)
@@ -429,7 +626,29 @@ def repair_unmapped_samples(
         degenerate_salvage_accepted=bool(degenerate_salvage_attempted and status == "PASS"),
         degenerate_salvage_method=degenerate_salvage_method,
         degenerate_salvage_rejection_reason=degenerate_salvage_rejection_reason,
+        dense_validation_resolution=dense_validation.resolution,
+        dense_unmapped_count=dense_validation.unmapped_count,
+        dense_degenerate_face_count=dense_validation.degenerate_face_count,
+        dense_min_triangle_area_3d=dense_validation.min_triangle_area_3d,
+        dense_failure_type=dense_validation.failure_type,
+        dense_coverage_repair_attempted=dense_coverage_repair_attempted,
+        dense_coverage_repair_accepted=dense_coverage_repair_accepted,
+        dense_coverage_repair_before=dense_coverage_repair_before,
+        dense_coverage_repair_after=dense_coverage_repair_after,
+        dense_coverage_repair_max_uv_displacement=dense_coverage_repair_max_uv_displacement,
+        degenerate_component_count=degenerate_component_count,
+        largest_degenerate_component_faces=largest_degenerate_component_faces,
+        degenerate_component_touches_boundary=degenerate_component_touches_boundary,
+        degenerate_component_repair_attempted=degenerate_component_repair_attempted,
+        degenerate_component_repair_accepted=degenerate_component_repair_accepted,
         repaired_uv=repaired_uv,
+        repair_timing=RepairTiming(
+            degenerate_relaxation_seconds=degenerate_relaxation_seconds,
+            component_repair_seconds=component_repair_seconds,
+            dense_validation_seconds=dense_validation_seconds,
+            dense_coverage_repair_seconds=dense_coverage_repair_seconds,
+            total_seconds=perf_counter() - repair_started,
+        ),
     )
 
 
@@ -438,8 +657,45 @@ def build_region_remesh(
     landmarks: pd.DataFrame,
     region: dict[str, object],
     context: RemeshContext | None = None,
+    backend: RemeshBackend | None = None,
 ) -> RegionRemeshResult:
     """Run remesh stages 1-8 for a single triangular region."""
+    backend = backend or resolve_remesh_backend("cpu")
+    try:
+        return _build_region_remesh_with_backend(
+            mesh,
+            landmarks,
+            region,
+            context=context,
+            backend=backend,
+        )
+    except BackendComputationError as exc:
+        if backend.name == "cuda" and backend.requested == "auto":
+            record_fallback = getattr(backend, "record_fallback", None)
+            if callable(record_fallback):
+                record_fallback(str(exc))
+            return _build_region_remesh_with_backend(
+                mesh,
+                landmarks,
+                region,
+                context=context,
+                backend=CpuRemeshBackend(
+                    requested="auto",
+                    fallback_reason=str(exc),
+                ),
+            )
+        raise
+
+
+def _build_region_remesh_with_backend(
+    mesh: trimesh.Trimesh,
+    landmarks: pd.DataFrame,
+    region: dict[str, object],
+    *,
+    context: RemeshContext | None,
+    backend: RemeshBackend,
+) -> RegionRemeshResult:
+    """Execute a complete region using one resolved numerical backend."""
     lm_a = str(region["lm_a"])
     lm_b = str(region["lm_b"])
     lm_c = str(region["lm_c"])
@@ -453,17 +709,31 @@ def build_region_remesh(
         boundary_paths = _cached_boundary_paths(context, snapped, lm_a, lm_b, lm_c)
         template = context.templates[int(region["resolution"])]
     patch = extract_patch_faces(mesh, boundary_paths)
-    parameterization = harmonic_parameterize_patch(mesh, patch, boundary_paths)
-    located = locate_uv_samples_in_faces(
-        parameterization.uv,
-        parameterization.local_faces,
-        template.uv,
-    )
-    sample_points_3d = map_samples_to_3d(
-        parameterization.local_vertices,
-        parameterization.local_faces,
-        located,
-    )
+    with backend.region_scope():
+        parameterization = harmonic_parameterize_patch(
+            mesh,
+            patch,
+            boundary_paths,
+            backend=backend,
+        )
+        face_indices, barycentric, unmapped_mask = backend.locate(
+            parameterization.uv,
+            parameterization.local_faces,
+            template.uv,
+            1e-9,
+        )
+        located = LocatedSamples(
+            sample_uv=template.uv,
+            face_indices=face_indices,
+            barycentric=barycentric,
+            unmapped_mask=unmapped_mask,
+        )
+        sample_points_3d = backend.map_to_3d(
+            parameterization.local_vertices,
+            parameterization.local_faces,
+            located.face_indices,
+            located.barycentric,
+        )
 
     return RegionRemeshResult(
         region_id=str(region["region_id"]),
@@ -626,7 +896,19 @@ def _cached_boundary_paths(
         key = (min(start, end), max(start, end))
         stored = context.path_cache.get(key)
         if stored is None:
-            stored = _shortest_vertex_path(context.adjacency, key[0], key[1])
+            if key[0] == key[1]:
+                stored = [key[0]]
+            else:
+                tree = context.shortest_path_trees.get(key[0])
+                if tree is None:
+                    tree = dijkstra(
+                        context.adjacency,
+                        directed=False,
+                        indices=key[0],
+                        return_predecessors=True,
+                    )
+                    context.shortest_path_trees[key[0]] = tree
+                stored = _shortest_path_from_tree(key[0], key[1], *tree)
             context.path_cache[key] = stored
         return stored if start == key[0] else list(reversed(stored))
 
@@ -697,8 +979,10 @@ def harmonic_parameterize_patch(
     mesh: trimesh.Trimesh,
     patch: PatchExtraction,
     boundary_paths: BoundaryPaths,
+    backend: RemeshBackend | None = None,
 ) -> PatchParameterization:
     """Compute a harmonic UV map for one extracted patch."""
+    backend = backend or resolve_remesh_backend("cpu")
     boundary_uv_global = _boundary_uv(mesh, boundary_paths)
     local_to_global = patch.local_to_global
     global_to_local = {int(g): i for i, g in enumerate(local_to_global)}
@@ -715,7 +999,13 @@ def harmonic_parameterize_patch(
 
     internal_ids = [i for i in range(n_vertices) if i not in boundary_uv_local]
     if internal_ids:
-        uv = _solve_harmonic_uv(patch.local_faces, uv, boundary_uv_local, internal_ids)
+        uv = _solve_harmonic_uv(
+            patch.local_faces,
+            uv,
+            boundary_uv_local,
+            internal_ids,
+            backend=backend,
+        )
 
     flipped, degenerate = _count_uv_face_quality(uv, patch.local_faces)
     return PatchParameterization(
@@ -941,6 +1231,26 @@ def _shortest_vertex_path(adjacency: csr_matrix, start: int, end: int) -> list[i
     return path
 
 
+def _shortest_path_from_tree(
+    start: int,
+    end: int,
+    distances: np.ndarray,
+    predecessors: np.ndarray,
+) -> list[int]:
+    """Reconstruct one path from a cached SciPy Dijkstra predecessor tree."""
+    if not np.isfinite(distances[int(end)]):
+        raise ValueError(f"no mesh path between vertices {start}->{end}")
+
+    path = [int(end)]
+    while path[-1] != int(start):
+        previous = int(predecessors[path[-1]])
+        if previous < 0:
+            raise ValueError(f"no predecessor while reconstructing {start}->{end}")
+        path.append(previous)
+    path.reverse()
+    return path
+
+
 def _find_seed_face(mesh: trimesh.Trimesh, boundary_paths: BoundaryPaths) -> int:
     vertices = np.asarray(mesh.vertices, dtype=float)
     corner_ids = [
@@ -1078,6 +1388,7 @@ def _solve_harmonic_uv(
     uv: np.ndarray,
     boundary_uv: dict[int, np.ndarray],
     internal_ids: list[int],
+    backend: RemeshBackend | None = None,
 ) -> np.ndarray:
     adjacency = _local_vertex_neighbors(local_faces, len(uv))
     internal_index = {vertex_id: i for i, vertex_id in enumerate(internal_ids)}
@@ -1094,7 +1405,8 @@ def _solve_harmonic_uv(
             elif neighbor in boundary_uv:
                 rhs[row] += boundary_uv[neighbor]
 
-    solved = spsolve(matrix.tocsr(), rhs)
+    backend = backend or resolve_remesh_backend("cpu")
+    solved = backend.solve_harmonic(matrix.tocsr(), rhs)
     solved = np.asarray(solved, dtype=float)
     if solved.ndim == 1:
         solved = solved.reshape(-1, 1)
@@ -1160,7 +1472,327 @@ def _smooth_fill_unmapped_samples(
         points[fixed_mask] = updated[fixed_mask]
 
 
-def _repair_degenerate_uv_faces(result: RegionRemeshResult) -> DegenerateUVRepair:
+def _degenerate_uv_repair_candidates(
+    result: RegionRemeshResult,
+    *,
+    topology: RegionRepairTopology | None = None,
+) -> list[DegenerateUVRepair]:
+    """Return deterministic local UV-reparameterization candidates.
+
+    Candidate order is intentionally conservative: preserve the historical
+    repair first, then try only stronger local relaxations from the original
+    UV coordinates. Callers must still pass dense r48 validation before a
+    candidate can be exported.
+    """
+    return [
+        _repair_degenerate_uv_faces(result, topology=topology),
+        _repair_degenerate_uv_faces(
+            result,
+            iteration_multiplier=12,
+            target_area_scale=1e-4,
+            method="local_uv_relaxation_extended",
+            topology=topology,
+        ),
+        _repair_degenerate_uv_faces(
+            result,
+            iteration_multiplier=12,
+            target_area_scale=1e-3,
+            method="local_uv_relaxation_high_area",
+            topology=topology,
+        ),
+    ]
+
+
+def _is_small_dense_coverage_gap(validation: DenseUVValidation) -> bool:
+    """Return whether a r48-only coverage gap is eligible for local UV repair."""
+    return (
+        validation.failure_type == "r48_unmapped"
+        and validation.degenerate_face_count == 0
+        and 0 < validation.unmapped_count <= _MAX_SMALL_DENSE_UV_GAP_COUNT
+    )
+
+
+def _profile_degenerate_uv_components(
+    result: RegionRemeshResult,
+    uv: np.ndarray,
+    *,
+    topology: RegionRepairTopology | None = None,
+) -> DegenerateUVComponentProfile:
+    """Describe edge-connected collapsed UV faces and their boundary contact."""
+    faces = np.asarray(result.parameterization.local_faces, dtype=int)
+    degenerate_ids = np.where(np.abs(_uv_face_signed_areas(uv, faces)) <= 1e-12)[0]
+    components = _edge_connected_face_components(faces, degenerate_ids)
+    boundary_ids = (topology or _prepare_region_repair_topology(result)).boundary_ids
+    touches_boundary = any(
+        any(int(vertex_id) in boundary_ids for face_id in component for vertex_id in faces[face_id])
+        for component in components
+    )
+    return DegenerateUVComponentProfile(
+        component_count=len(components),
+        largest_component_face_count=max((len(component) for component in components), default=0),
+        touches_boundary=touches_boundary,
+        repairable_component_count=sum(
+            not any(int(vertex_id) in boundary_ids for face_id in component for vertex_id in faces[face_id])
+            for component in components
+        ),
+    )
+
+
+def _repair_degenerate_uv_components(
+    result: RegionRemeshResult,
+    base_repair: DegenerateUVRepair,
+    *,
+    topology: RegionRepairTopology | None = None,
+) -> DegenerateUVComponentRepair:
+    """Reparameterize non-boundary collapsed UV components with harmonic UV."""
+    uv = np.asarray(base_repair.uv, dtype=float).copy()
+    repair_topology = topology or _prepare_region_repair_topology(result)
+    faces = repair_topology.faces
+    profile = _profile_degenerate_uv_components(result, uv, topology=repair_topology)
+    if profile.component_count == 0 or profile.touches_boundary:
+        return DegenerateUVComponentRepair(base_repair, profile, attempted=False)
+
+    components = _edge_connected_face_components(
+        faces,
+        np.where(np.abs(_uv_face_signed_areas(uv, faces)) <= 1e-12)[0],
+    )
+    vertex_faces = repair_topology.incident_faces
+    boundary_ids = repair_topology.boundary_ids
+    area_tolerance = 1e-12
+    attempted = False
+
+    for component in components:
+        domain = set(component)
+        for face_id in component:
+            for vertex_id in faces[face_id]:
+                domain.update(vertex_faces[int(vertex_id)])
+        domain_vertices = {int(vertex_id) for face_id in domain for vertex_id in faces[face_id]}
+        internal_ids = sorted(
+            vertex_id
+            for vertex_id in domain_vertices
+            if vertex_id not in boundary_ids and set(vertex_faces[vertex_id]).issubset(domain)
+        )
+        if not internal_ids:
+            continue
+
+        boundary_uv = {
+            vertex_id: uv[vertex_id].copy()
+            for vertex_id in range(len(uv))
+            if vertex_id not in internal_ids
+        }
+        trial = _solve_harmonic_uv(faces, uv, boundary_uv, internal_ids)
+        attempted = True
+        if not _uv_component_candidate_preserves_face_quality(
+            uv,
+            trial,
+            faces,
+            np.asarray(sorted(domain), dtype=int),
+            area_tolerance,
+        ):
+            continue
+        uv = trial
+
+    degenerate_after = int((np.abs(_uv_face_signed_areas(uv, faces)) <= area_tolerance).sum())
+    return DegenerateUVComponentRepair(
+        uv_repair=DegenerateUVRepair(
+            uv=uv,
+            degenerate_before=base_repair.degenerate_before,
+            degenerate_after=degenerate_after,
+            method="local_uv_component_harmonic",
+            rejection_reason="" if degenerate_after == 0 else "degenerate_repair_incomplete",
+        ),
+        profile=profile,
+        attempted=attempted,
+    )
+
+
+def _edge_connected_face_components(
+    faces: np.ndarray,
+    face_ids: np.ndarray,
+) -> list[set[int]]:
+    selected = {int(face_id) for face_id in np.asarray(face_ids, dtype=int)}
+    if not selected:
+        return []
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_id in selected:
+        for edge in _face_edges(faces[face_id]):
+            edge_to_faces.setdefault(_edge_key(*edge), []).append(face_id)
+    neighbors = {face_id: set() for face_id in selected}
+    for linked in edge_to_faces.values():
+        for face_id in linked:
+            neighbors[face_id].update(other for other in linked if other != face_id)
+    components: list[set[int]] = []
+    remaining = set(selected)
+    while remaining:
+        seed = min(remaining)
+        component = {seed}
+        queue = [seed]
+        remaining.remove(seed)
+        while queue:
+            face_id = queue.pop()
+            for neighbor in sorted(neighbors[face_id]):
+                if neighbor in remaining:
+                    remaining.remove(neighbor)
+                    component.add(neighbor)
+                    queue.append(neighbor)
+        components.append(component)
+    return components
+
+
+def _uv_candidate_preserves_face_quality(
+    before_uv: np.ndarray,
+    after_uv: np.ndarray,
+    faces: np.ndarray,
+    area_tolerance: float,
+) -> bool:
+    before = _uv_face_signed_areas(before_uv, faces)
+    after = _uv_face_signed_areas(after_uv, faces)
+    if np.any(np.abs(after) <= area_tolerance):
+        return False
+    dominant_sign = _dominant_uv_orientation(before, area_tolerance)
+    expected_sign = np.where(np.abs(before) <= area_tolerance, dominant_sign, np.sign(before))
+    return bool(np.all(np.sign(after) == expected_sign))
+
+
+def _uv_component_candidate_preserves_face_quality(
+    before_uv: np.ndarray,
+    after_uv: np.ndarray,
+    faces: np.ndarray,
+    affected_face_ids: np.ndarray,
+    area_tolerance: float,
+) -> bool:
+    """Check only faces affected by a component's changed internal vertices."""
+    all_faces = np.asarray(faces, dtype=int)
+    affected_faces = all_faces[np.asarray(affected_face_ids, dtype=int)]
+    before = _uv_face_signed_areas(before_uv, affected_faces)
+    after = _uv_face_signed_areas(after_uv, affected_faces)
+    if np.any(np.abs(after) <= area_tolerance):
+        return False
+    dominant_sign = _dominant_uv_orientation(
+        _uv_face_signed_areas(before_uv, all_faces),
+        area_tolerance,
+    )
+    expected_sign = np.where(np.abs(before) <= area_tolerance, dominant_sign, np.sign(before))
+    return bool(np.all(np.sign(after) == expected_sign))
+
+
+def _repair_small_dense_uv_gaps(
+    result: RegionRemeshResult,
+    base_repair: DegenerateUVRepair,
+    validation: DenseUVValidation,
+    *,
+    topology: RegionRepairTopology | None = None,
+) -> DegenerateUVRepair:
+    """Try bounded internal UV moves to cover a small number of r48 gaps.
+
+    This is a true UV reparameterization candidate: no 3D points are filled
+    and every accepted local move preserves the current orientation of every
+    incident UV face. The caller remains responsible for the final full r48
+    validation.
+    """
+    if not _is_small_dense_coverage_gap(validation):
+        return base_repair
+
+    uv = np.asarray(base_repair.uv, dtype=float).copy()
+    faces = np.asarray(result.parameterization.local_faces, dtype=int)
+    template = make_subdivision_template(validation.resolution)
+    repair_topology = topology or _prepare_region_repair_topology(result)
+    boundary_ids = repair_topology.boundary_ids
+    incident_faces = repair_topology.incident_faces
+    area_tolerance = 1e-12
+    initial_areas = _uv_face_signed_areas(uv, faces)
+    dominant_sign = _dominant_uv_orientation(initial_areas, area_tolerance)
+    located = locate_uv_samples_in_faces_indexed(uv, faces, template.uv)
+    unmapped_count = located.unmapped_count
+
+    for sample_uv in template.uv[located.unmapped_mask]:
+        current_areas = _uv_face_signed_areas(uv, faces)
+        face_ids = _nearest_uv_face_ids(uv, faces, sample_uv, limit=12)
+        accepted = False
+        for face_id in face_ids:
+            face = faces[int(face_id)]
+            centroid = np.mean(uv[face], axis=0)
+            direction = np.asarray(sample_uv, dtype=float) - centroid
+            if float(np.linalg.norm(direction)) <= 1e-14:
+                continue
+            for vertex_id in face:
+                vertex_id = int(vertex_id)
+                if vertex_id in boundary_ids:
+                    continue
+                for scale in (1.0, 0.5, 0.25, 0.125):
+                    proposal = uv[vertex_id] + direction * scale
+                    if not _uv_proposal_is_valid(
+                        uv,
+                        faces,
+                        int(face_id),
+                        vertex_id,
+                        proposal,
+                        incident_faces[vertex_id],
+                        current_areas,
+                        dominant_sign,
+                        area_tolerance,
+                    ):
+                        continue
+                    trial = uv.copy()
+                    trial[vertex_id] = proposal
+                    after = locate_uv_samples_in_faces_indexed(trial, faces, template.uv).unmapped_count
+                    if after < unmapped_count:
+                        uv = trial
+                        unmapped_count = after
+                        accepted = True
+                        break
+                if accepted:
+                    break
+            if accepted:
+                break
+
+    degenerate_after = int((np.abs(_uv_face_signed_areas(uv, faces)) <= area_tolerance).sum())
+    return DegenerateUVRepair(
+        uv=uv,
+        degenerate_before=base_repair.degenerate_before,
+        degenerate_after=degenerate_after,
+        method="local_uv_coverage_repair",
+        rejection_reason="" if degenerate_after == 0 else "degenerate_repair_incomplete",
+    )
+
+
+def _nearest_uv_face_ids(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    point: np.ndarray,
+    *,
+    limit: int,
+) -> np.ndarray:
+    centroids = np.mean(np.asarray(uv, dtype=float)[np.asarray(faces, dtype=int)], axis=1)
+    distances = np.linalg.norm(centroids - np.asarray(point, dtype=float), axis=1)
+    count = min(max(int(limit), 1), len(faces))
+    return np.argsort(distances, kind="stable")[:count]
+
+
+def _max_uv_displacement(before: np.ndarray, after: np.ndarray) -> float:
+    displacement = np.linalg.norm(np.asarray(after, dtype=float) - np.asarray(before, dtype=float), axis=1)
+    return float(np.max(displacement)) if len(displacement) else 0.0
+
+
+def _prepare_region_repair_topology(result: RegionRemeshResult) -> RegionRepairTopology:
+    """Build local repair topology once for reuse by all UV salvage candidates."""
+    faces = np.asarray(result.parameterization.local_faces, dtype=int)
+    return RegionRepairTopology(
+        faces=faces,
+        boundary_ids=_boundary_local_vertex_ids(result),
+        neighbors=_local_vertex_neighbors(faces, len(result.parameterization.uv)),
+        incident_faces=_vertex_incident_faces(faces, len(result.parameterization.uv)),
+    )
+
+
+def _repair_degenerate_uv_faces(
+    result: RegionRemeshResult,
+    *,
+    iteration_multiplier: int = 3,
+    target_area_scale: float = 1e-4,
+    method: str = "local_uv_relaxation",
+    topology: RegionRepairTopology | None = None,
+) -> DegenerateUVRepair:
     """Relax internal UV vertices until small collapsed faces are resolved."""
     uv = np.asarray(result.parameterization.uv, dtype=float).copy()
     faces = np.asarray(result.parameterization.local_faces, dtype=int)
@@ -1170,13 +1802,14 @@ def _repair_degenerate_uv_faces(result: RegionRemeshResult) -> DegenerateUVRepai
     if degenerate_before == 0:
         return DegenerateUVRepair(uv, 0, 0, "")
 
-    boundary_ids = _boundary_local_vertex_ids(result)
-    neighbors = _local_vertex_neighbors(faces, len(uv))
-    incident_faces = _vertex_incident_faces(faces, len(uv))
+    repair_topology = topology or _prepare_region_repair_topology(result)
+    boundary_ids = repair_topology.boundary_ids
+    neighbors = repair_topology.neighbors
+    incident_faces = repair_topology.incident_faces
     dominant_sign = _dominant_uv_orientation(initial_areas, area_tolerance)
-    target_area = _uv_repair_target_area(initial_areas, area_tolerance)
+    target_area = _uv_repair_target_area(initial_areas, area_tolerance, target_area_scale)
 
-    for _ in range(max(degenerate_before * 3, 1)):
+    for _ in range(max(degenerate_before * int(iteration_multiplier), 1)):
         current_areas = _uv_face_signed_areas(uv, faces)
         degenerate_face_ids = np.where(np.abs(current_areas) <= area_tolerance)[0]
         if len(degenerate_face_ids) == 0:
@@ -1210,7 +1843,7 @@ def _repair_degenerate_uv_faces(result: RegionRemeshResult) -> DegenerateUVRepai
         uv=uv,
         degenerate_before=degenerate_before,
         degenerate_after=degenerate_after,
-        method="local_uv_relaxation",
+        method=method,
         rejection_reason=rejection_reason,
     )
 
@@ -1239,11 +1872,15 @@ def _dominant_uv_orientation(areas: np.ndarray, area_tolerance: float) -> float:
     return 1.0 if float(np.median(valid)) >= 0.0 else -1.0
 
 
-def _uv_repair_target_area(areas: np.ndarray, area_tolerance: float) -> float:
+def _uv_repair_target_area(
+    areas: np.ndarray,
+    area_tolerance: float,
+    target_area_scale: float = 1e-4,
+) -> float:
     valid = np.abs(areas[np.abs(areas) > area_tolerance])
     if len(valid) == 0:
         return area_tolerance * 10.0
-    return max(area_tolerance * 10.0, float(np.median(valid)) * 1e-4)
+    return max(area_tolerance * 10.0, float(np.median(valid)) * float(target_area_scale))
 
 
 def _find_uv_relaxation_proposal(
@@ -1354,12 +1991,50 @@ def _dense_uv_mapping_is_valid(
     validation_resolution: int = 48,
 ) -> bool:
     """Check repaired UV coverage and mapped template-face geometry at r48."""
+    return _inspect_dense_uv_mapping(
+        uv,
+        faces,
+        vertices,
+        validation_resolution=validation_resolution,
+    ).is_valid
+
+
+def _inspect_dense_uv_mapping(
+    uv: np.ndarray,
+    faces: np.ndarray,
+    vertices: np.ndarray,
+    *,
+    validation_resolution: int = 48,
+) -> DenseUVValidation:
+    """Diagnose r48 UV coverage separately from mapped 3D face collapse."""
     template = make_subdivision_template(validation_resolution)
     located = locate_uv_samples_in_faces_indexed(uv, faces, template.uv)
-    if located.unmapped_count > 0:
-        return False
     points = map_samples_to_3d(vertices, faces, located)
-    return _template_points_are_valid(points, template.faces)
+    triangles = points[np.asarray(template.faces, dtype=int)]
+    finite_faces = np.isfinite(triangles).all(axis=(1, 2))
+    areas = np.linalg.norm(
+        np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]),
+        axis=1,
+    )
+    finite_areas = areas[finite_faces]
+    # ``areas`` is the doubled triangle area used by the historical gate;
+    # report the conventional geometric area in QC for easier interpretation.
+    min_triangle_area_3d = float(np.min(finite_areas) * 0.5) if len(finite_areas) else float("nan")
+    degenerate_face_count = int((finite_areas <= 1e-12).sum())
+    unmapped_count = int(located.unmapped_count)
+    if unmapped_count > 0:
+        failure_type = "r48_unmapped"
+    elif degenerate_face_count > 0:
+        failure_type = "r48_3d_degenerate"
+    else:
+        failure_type = "pass"
+    return DenseUVValidation(
+        resolution=int(validation_resolution),
+        unmapped_count=unmapped_count,
+        degenerate_face_count=degenerate_face_count,
+        min_triangle_area_3d=min_triangle_area_3d,
+        failure_type=failure_type,
+    )
 
 
 def _template_points_are_valid(points: np.ndarray, faces: np.ndarray) -> bool:
